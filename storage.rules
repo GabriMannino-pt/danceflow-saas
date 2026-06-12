@@ -1,0 +1,72 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Helper: authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Helper: check role from token claims
+    function getRole() {
+      return request.auth.token.role;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getRole() in ['admin', 'superadmin'];
+    }
+
+    function isTeacher() {
+      return isAuthenticated() && getRole() in ['teacher', 'admin', 'superadmin'];
+    }
+
+    // Max file size: 10MB
+    function isValidSize() {
+      return request.resource.size <= 10 * 1024 * 1024;
+    }
+
+    // Allowed types
+    function isValidImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function isValidDocument() {
+      return request.resource.contentType.matches('application/pdf')
+        || request.resource.contentType.matches('image/.*');
+    }
+
+    // School logos
+    match /schools/{schoolId}/logo/{file} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidImage() && isValidSize();
+    }
+
+    // Student documents
+    match /schools/{schoolId}/students/{studentId}/{file} {
+      allow read: if isTeacher();
+      allow write: if isTeacher() && isValidDocument() && isValidSize();
+      allow delete: if isAdmin();
+    }
+
+    // Student photos
+    match /schools/{schoolId}/photos/{studentId}/{file} {
+      allow read: if isAuthenticated();
+      allow write: if isTeacher() && isValidImage() && isValidSize();
+      allow delete: if isAdmin();
+    }
+
+    // Event images
+    match /schools/{schoolId}/events/{eventId}/{file} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidImage() && isValidSize();
+      allow delete: if isAdmin();
+    }
+
+    // Receipts / PDFs (generated server-side)
+    match /schools/{schoolId}/receipts/{file} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Cloud Functions only
+    }
+  }
+}

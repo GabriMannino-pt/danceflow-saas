@@ -1,0 +1,23 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "students",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "isDeleted", "order": "ASCENDING" },
+        { "fieldPath": "isActive", "order": "ASCENDING" },
+        { "fieldPath": "medicalInfo.medicalClearance", "order": "ASCENDING" },
+        { "fieldPath": "medicalInfo.medicalClearanceExpiry", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "students",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "isDeleted", "order": "ASCENDING" },
+        { "fieldPath": "isActive", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

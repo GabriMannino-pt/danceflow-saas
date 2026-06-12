@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "outDir": "lib",
+    "rootDir": "src",
+    "sourceMap": true,
+    "strict": true,
+    "target": "es2022",
+    "typeRoots": ["./node_modules/@types"]
+  },
+  "compileOnSave": true,
+  "include": [
+    "src"
+  ]
+}
