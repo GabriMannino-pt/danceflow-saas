@@ -7,6 +7,7 @@ import { COLLECTIONS, nowTimestamp } from '@/lib/converters';
 import { Button, Input } from '@/components/ui';
 import { formatCurrency } from '@/lib/utils';
 import toast from 'react-hot-toast';
+import { useSchoolStore } from '@/stores/schoolStore';
 
 interface StripePaymentDrawerProps {
   isOpen: boolean;
@@ -16,6 +17,7 @@ interface StripePaymentDrawerProps {
 }
 
 export default function StripePaymentDrawer({ isOpen, onClose, payment, onSuccess }: StripePaymentDrawerProps) {
+  const { students, courses } = useSchoolStore();
   const [cardNumber, setCardNumber] = useState('');
   const [expiry, setExpiry] = useState('');
   const [cvv, setCvv] = useState('');
@@ -24,6 +26,13 @@ export default function StripePaymentDrawer({ isOpen, onClose, payment, onSucces
   const [success, setSuccess] = useState(false);
 
   if (!payment) return null;
+
+  const student = students.find(s => s.id === payment.studentId);
+  const isFlatRate = student?.flatRateEnabled && payment.type === 'monthly';
+  const paymentTitle = isFlatRate 
+    ? `Retta Mensile Forfettaria - ${payment.month}/${payment.year}` 
+    : payment.description;
+
 
   const handleCardNumberChange = (e: any) => {
     // Rimuovi spazi e formatta a gruppi di 4 cifre
@@ -154,9 +163,22 @@ export default function StripePaymentDrawer({ isOpen, onClose, payment, onSucces
               ) : (
                 <form onSubmit={handleSubmit} className='space-y-5'>
                   {/* Riepilogo Prodotto */}
-                  <div className='p-4 rounded-2xl bg-white/5 border border-white/5 space-y-1'>
-                    <span className='text-[10px] uppercase tracking-wider text-brand-300 font-bold'>Dettaglio Quota</span>
-                    <h4 className='text-sm font-bold text-white'>{payment.description}</h4>
+                  <div className='p-4 rounded-2xl bg-white/5 border border-white/5 space-y-1.5'>
+                    <span className='text-[10px] uppercase tracking-wider text-brand-300 font-bold'>
+                      {isFlatRate ? '✨ Quota Forfettaria Attiva' : 'Dettaglio Quota'}
+                    </span>
+                    <h4 className='text-sm font-bold text-white'>{paymentTitle}</h4>
+                    
+                    {isFlatRate && student?.enrolledCourseIds && student.enrolledCourseIds.length > 0 && (
+                      <div className='text-[11px] text-white/50 pt-1 space-y-0.5 border-t border-white/5 mt-1.5'>
+                        <span className='text-[10px] text-white/30 block mb-0.5'>Corsi Coperti dal Forfait:</span>
+                        {student.enrolledCourseIds.map(cId => {
+                          const cName = courses.find(c => c.id === cId)?.name;
+                          return cName ? <p key={cId} className="flex items-center gap-1">✓ {cName}</p> : null;
+                        })}
+                      </div>
+                    )}
+                    
                     <div className='pt-2 flex items-center justify-between border-t border-white/5 mt-2'>
                       <span className='text-xs text-white/40'>Totale da saldare</span>
                       <span className='text-lg font-black text-white'>{formatCurrency(payment.amount)}</span>

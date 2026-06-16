@@ -134,12 +134,15 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
+      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && hasCustomFee)
-        ? student.customMonthlyFee!
-        : (isMonthly && course?.fee?.monthly)
-          ? course.fee.monthly
-          : (p.totalAmount ?? p.amount);
+      const totalAmount = (isMonthly && isFlatRate)
+        ? student.flatRateAmount!
+        : (isMonthly && hasCustomFee)
+          ? student.customMonthlyFee!
+          : (isMonthly && course?.fee?.monthly)
+            ? course.fee.monthly
+            : (p.totalAmount ?? p.amount);
 
       const prevPaid = p.paidAmount ?? 0;
       const newPaid = prevPaid + installmentAmount;
@@ -226,6 +229,43 @@ export function usePayments() {
       let count = 0;
 
       for (const student of enrolledActiveStudents) {
+        if (student.flatRateEnabled) {
+          // Check if any monthly payment already exists for this student for this month/year
+          const existingFlat = payments.find(
+            (p) => p.studentId === student.id && 
+                   p.month === month && 
+                   p.year === year &&
+                   p.type === 'monthly'
+          );
+
+          if (!existingFlat) {
+            const feeVal = student.flatRateAmount ?? 0;
+            const newRef = doc(paymentsCol);
+            const newPayment: Payment = {
+              id: newRef.id,
+              schoolId,
+              studentId: student.id,
+              courseId: courseId, // associated with the course triggering the batch
+              description: `Retta Mensile Forfettaria - ${month}/${year}`,
+              amount: feeVal,
+              currency: 'EUR',
+              status: 'pending',
+              dueDate: toTimestamp(dueDate),
+              type: 'monthly',
+              month,
+              year,
+              totalAmount: feeVal,
+              paidAmount: 0,
+              remainingAmount: feeVal,
+              createdAt: nowTimestamp(),
+              updatedAt: nowTimestamp(),
+            };
+            batch.set(newRef, newPayment);
+            count++;
+          }
+          continue; // skip single course calculations
+        }
+
         // Check if payment already exists for this month/year/course/student
         const existing = payments.find(
           (p) => p.studentId === student.id && 
@@ -310,12 +350,15 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
+      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && hasCustomFee)
-        ? student.customMonthlyFee!
-        : (isMonthly && course?.fee?.monthly)
-          ? course.fee.monthly
-          : (p.totalAmount ?? p.amount);
+      const totalAmount = (isMonthly && isFlatRate)
+        ? student.flatRateAmount!
+        : (isMonthly && hasCustomFee)
+          ? student.customMonthlyFee!
+          : (isMonthly && course?.fee?.monthly)
+            ? course.fee.monthly
+            : (p.totalAmount ?? p.amount);
 
       const newPaid = history.reduce((sum, inst) => sum + inst.amount, 0);
       const remainingAmount = Math.max(0, totalAmount - newPaid);
@@ -370,12 +413,15 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
+      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && hasCustomFee)
-        ? student.customMonthlyFee!
-        : (isMonthly && course?.fee?.monthly)
-          ? course.fee.monthly
-          : (p.totalAmount ?? p.amount);
+      const totalAmount = (isMonthly && isFlatRate)
+        ? student.flatRateAmount!
+        : (isMonthly && hasCustomFee)
+          ? student.customMonthlyFee!
+          : (isMonthly && course?.fee?.monthly)
+            ? course.fee.monthly
+            : (p.totalAmount ?? p.amount);
 
       const newPaid = history.reduce((sum, inst) => sum + inst.amount, 0);
       const remainingAmount = Math.max(0, totalAmount - newPaid);

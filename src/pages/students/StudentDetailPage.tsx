@@ -163,7 +163,7 @@ export default function StudentDetailPage() {
   }
 
   // ─── Update Custom Fees ───────────────────────────────────────────────────────
-  async function handleUpdateCustomFees(fees: { customMonthlyFee: number | null; customRegistrationFee: number | null; customShowFee: number | null }) {
+  async function handleUpdateCustomFees(fees: Partial<Student>) {
     if (!student || !schoolId || !studentId) return;
     await editStudent(student.id, fees);
     void loadAll(schoolId, studentId);
@@ -183,16 +183,19 @@ export default function StudentDetailPage() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
+      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const total = (isMonthly && hasCustomFee)
-        ? student.customMonthlyFee!
-        : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
-          ? student.customRegistrationFee
-          : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
-            ? student.customShowFee
-            : (isMonthly && course?.fee?.monthly)
-              ? course.fee.monthly
-              : (p.totalAmount ?? p.amount);
+      const total = (isMonthly && isFlatRate)
+        ? student.flatRateAmount!
+        : (isMonthly && hasCustomFee)
+          ? student.customMonthlyFee!
+          : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
+            ? student.customRegistrationFee
+            : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
+              ? student.customShowFee
+              : (isMonthly && course?.fee?.monthly)
+                ? course.fee.monthly
+                : (p.totalAmount ?? p.amount);
       
       const paid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
       const remaining = Math.max(0, total - paid);
@@ -632,7 +635,7 @@ function PagamentiTab({
   payments: Payment[];
   stats: { paid: number; overdue: number; pending: number };
   student: Student;
-  onUpdateCustomFees: (fees: { customMonthlyFee: number | null; customRegistrationFee: number | null; customShowFee: number | null }) => Promise<void>;
+  onUpdateCustomFees: (fees: Partial<Student>) => Promise<void>;
   onRefresh: () => void;
 }) {
   const { 
@@ -647,6 +650,8 @@ function PagamentiTab({
   const [feeInput, setFeeInput] = useState(student.customMonthlyFee?.toString() || '');
   const [registrationFeeInput, setRegistrationFeeInput] = useState(student.customRegistrationFee?.toString() || '');
   const [showFeeInput, setShowFeeInput] = useState(student.customShowFee?.toString() || '');
+  const [flatRateEnabled, setFlatRateEnabled] = useState(student.flatRateEnabled || false);
+  const [flatRateAmountInput, setFlatRateAmountInput] = useState(student.flatRateAmount?.toString() || '');
   const [selectedExportYear, setSelectedExportYear] = useState('2025-2026');
   const [saving, setSaving] = useState(false);
 
@@ -730,6 +735,14 @@ function PagamentiTab({
     const monthlyVal = feeInput.trim() === '' ? null : Number(feeInput);
     const regVal = registrationFeeInput.trim() === '' ? null : Number(registrationFeeInput);
     const showVal = showFeeInput.trim() === '' ? null : Number(showFeeInput);
+    const flatAmountVal = flatRateAmountInput.trim() === '' ? null : Number(flatRateAmountInput);
+
+    if (flatRateEnabled) {
+      if (flatAmountVal === null || isNaN(flatAmountVal) || flatAmountVal <= 0) {
+        toast.error("Inserisci un importo valido e maggiore di zero per la quota forfettaria.");
+        return;
+      }
+    }
 
     if ((monthlyVal !== null && isNaN(monthlyVal)) || 
         (regVal !== null && isNaN(regVal)) || 
@@ -740,9 +753,11 @@ function PagamentiTab({
     setSaving(true);
     try {
       await onUpdateCustomFees({
-        customMonthlyFee: monthlyVal,
+        customMonthlyFee: flatRateEnabled ? null : monthlyVal,
         customRegistrationFee: regVal,
         customShowFee: showVal,
+        flatRateEnabled,
+        flatRateAmount: flatRateEnabled ? flatAmountVal : null,
       });
       toast.success('Quote personalizzate salvate con successo!');
     } catch (err) {
@@ -858,14 +873,43 @@ function PagamentiTab({
         <p className="text-xs text-white/50 mb-4">
           Imposta quote personalizzate per questo allievo (es. sconti fratelli). Lascia vuoto per utilizzare le tariffe standard.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          <Input
-            type="number"
-            label="Retta Mensile (€)"
-            placeholder="Es. 45.00"
-            value={feeInput}
-            onChange={(e) => setFeeInput(e.target.value)}
+
+        <div className="flex items-center space-x-3 mb-6 pb-4 border-b border-white/5">
+          <input
+            type="checkbox"
+            id="flatRateEnabled"
+            checked={flatRateEnabled}
+            onChange={(e) => setFlatRateEnabled(e.target.checked)}
+            className="rounded border-white/10 bg-surface-800 text-brand-500 focus:ring-brand-500 h-4 w-4"
           />
+          <div>
+            <label htmlFor="flatRateEnabled" className="text-xs font-bold text-white cursor-pointer flex items-center gap-1.5">
+              <span>🔒 Attiva Quota Forfettaria (Flat Rate)</span>
+            </label>
+            <p className="text-[11px] text-white/40">Se attivo, l'allievo pagherà un importo fisso mensile fisso indipendentemente dal numero di corsi frequentati.</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+          {flatRateEnabled ? (
+            <Input
+              type="number"
+              label="Importo Quota Forfettaria Mensile (€) *"
+              placeholder="Es. 80.00"
+              value={flatRateAmountInput}
+              onChange={(e) => setFlatRateAmountInput(e.target.value)}
+              className="border-brand-500/60 focus:border-brand-500"
+              required
+            />
+          ) : (
+            <Input
+              type="number"
+              label="Retta Mensile (€)"
+              placeholder="Es. 45.00"
+              value={feeInput}
+              onChange={(e) => setFeeInput(e.target.value)}
+            />
+          )}
           <Input
             type="number"
             label="Quota Iscrizione (€)"

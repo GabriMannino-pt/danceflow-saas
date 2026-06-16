@@ -103,16 +103,19 @@ export default function PaymentsPage() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
+      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const total = (isMonthly && hasCustomFee)
-        ? student.customMonthlyFee!
-        : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
-          ? student.customRegistrationFee
-          : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
-            ? student.customShowFee
-            : (isMonthly && course?.fee?.monthly)
-              ? course.fee.monthly
-              : (p.totalAmount ?? p.amount);
+      const total = (isMonthly && isFlatRate)
+        ? student.flatRateAmount!
+        : (isMonthly && hasCustomFee)
+          ? student.customMonthlyFee!
+          : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
+            ? student.customRegistrationFee
+            : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
+              ? student.customShowFee
+              : (isMonthly && course?.fee?.monthly)
+                ? course.fee.monthly
+                : (p.totalAmount ?? p.amount);
       
       const paid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
       const remaining = Math.max(0, total - paid);
@@ -620,12 +623,30 @@ export default function PaymentsPage() {
                       return (
                         <tr key={p.id} className='hover:bg-white/[0.03] transition-colors group'>
                           <td className='py-3.5 px-5'>
-                            <p className="font-semibold text-white">{student ? `${student.lastName} ${student.firstName}` : 'N/D'}</p>
-                          </td>
-                          <td className='py-3.5 px-5'>
-                            <p className="text-white/90">{p.description}</p>
-                            {p.courseId && <p className="text-xs text-white/40">{courses.find(c => c.id === p.courseId)?.name}</p>}
-                          </td>
+                             <div className="flex flex-wrap items-center gap-2">
+                               <p className="font-semibold text-white">{student ? `${student.lastName} ${student.firstName}` : 'N/D'}</p>
+                               {student?.flatRateEnabled && (
+                                 <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-gold-500/10 text-gold-300 border border-gold-500/20 shadow-[0_0_10px_rgba(245,158,11,0.1)]">
+                                   ✨ Flat Rate
+                                 </span>
+                               )}
+                             </div>
+                           </td>
+                           <td className='py-3.5 px-5'>
+                             <p className="text-white/90">{p.description}</p>
+                             {p.courseId && (
+                               <p className="text-xs text-white/40">
+                                 {student?.flatRateEnabled && p.type === 'monthly' ? (
+                                   <span>
+                                     <s className="opacity-50">{courses.find(c => c.id === p.courseId)?.name}</s>
+                                     <span className="text-gold-400 font-semibold ml-2">(Incluso nella quota forfettaria)</span>
+                                   </span>
+                                 ) : (
+                                   courses.find(c => c.id === p.courseId)?.name
+                                 )}
+                               </p>
+                             )}
+                           </td>
                           <td className='py-3.5 px-5 font-bold text-white'>
                             <div>
                               €{(p.paidAmount ?? 0).toFixed(2)}

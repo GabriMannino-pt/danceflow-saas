@@ -114,6 +114,8 @@ export interface Student extends TimestampFields, SoftDelete {
   customMonthlyFee?: number | null;
   customRegistrationFee?: number | null;
   customShowFee?: number | null;
+  flatRateEnabled?: boolean;
+  flatRateAmount?: number | null;
   signatureMetadata?: {
     ipAddress: string;
     timestamp: any;
