@@ -44,6 +44,9 @@ export interface School extends TimestampFields, SoftDelete {
   customPrivacyUrl?: string;
   customTermsUrl?: string;
   suspended?: boolean;
+  legalName?: string;
+  vatNumber?: string;
+  fiscalCode?: string;
   whatsappConfig?: {
     provider: 'twilio' | 'meta';
     credentials: {
@@ -286,6 +289,7 @@ export interface Payment extends TimestampFields {
   notes?: string;
   type: 'monthly' | 'registration' | 'event' | 'costume' | 'other';
   month?: number; // 1-12 for monthly fees
+  months?: number[]; // [10, 11] for multi-month fees
   year?: number;
   payments?: Array<{
     amount: number;

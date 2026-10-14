@@ -46,7 +46,7 @@ export function QuickPaymentModal({
   // Payment Type: 'monthly' | 'registration'
   const [paymentType, setPaymentType] = useState<'monthly' | 'registration'>('monthly');
   const [selectedCourseId, setSelectedCourseId] = useState<string>('');
-  const [month, setMonth] = useState<number>(initialMonth || (new Date().getMonth() + 1));
+  const [selectedMonths, setSelectedMonths] = useState<number[]>([initialMonth || (new Date().getMonth() + 1)]);
   const [year, setYear] = useState<number>(new Date().getFullYear());
   const [amount, setAmount] = useState<number>(40);
   const [method, setMethod] = useState<PaymentMethod>('cash');
@@ -83,6 +83,42 @@ export function QuickPaymentModal({
     return enrolled.length > 0 ? enrolled : courses;
   }, [selectedStudent, courses]);
 
+  // Single base fee
+  const standardSingleFee = useMemo(() => {
+    if (!selectedStudent) return 40;
+    const targetCourse = courses.find((c) => c.id === selectedCourseId);
+    if (paymentType === 'monthly') {
+      return selectedStudent.customMonthlyFee !== undefined && selectedStudent.customMonthlyFee !== null
+        ? selectedStudent.customMonthlyFee
+        : (targetCourse?.fee?.monthly || 40);
+    }
+    return selectedStudent.customRegistrationFee !== undefined && selectedStudent.customRegistrationFee !== null
+      ? selectedStudent.customRegistrationFee
+      : (targetCourse?.fee?.registration || 30);
+  }, [selectedStudent, selectedCourseId, paymentType, courses]);
+
+  // Standard fee multiplied by months
+  const standardFee = useMemo(() => {
+    if (paymentType === 'monthly') {
+      return standardSingleFee * (selectedMonths.length || 1);
+    }
+    return standardSingleFee;
+  }, [paymentType, standardSingleFee, selectedMonths.length]);
+
+  const toggleMonth = (mNum: number) => {
+    setSelectedMonths((prev) => {
+      let updated: number[];
+      if (prev.includes(mNum)) {
+        if (prev.length === 1) return prev; // keep at least one
+        updated = prev.filter((m) => m !== mNum);
+      } else {
+        updated = [...prev, mNum].sort((a, b) => a - b);
+      }
+      setAmount(standardSingleFee * updated.length);
+      return updated;
+    });
+  };
+
   // Initialize or reset when modal opens or initialStudentId changes
   useEffect(() => {
     if (isOpen) {
@@ -93,8 +129,9 @@ export function QuickPaymentModal({
         setSelectedStudentId('');
         setStudentSearch('');
       }
+      const initM = initialMonth || (new Date().getMonth() + 1);
       setPaymentType('monthly');
-      setMonth(initialMonth || (new Date().getMonth() + 1));
+      setSelectedMonths([initM]);
       setYear(new Date().getFullYear());
       setDate(new Date().toISOString().split('T')[0]);
       setMethod('cash');
@@ -119,7 +156,7 @@ export function QuickPaymentModal({
         const stdFee = selectedStudent.customMonthlyFee !== undefined && selectedStudent.customMonthlyFee !== null
           ? selectedStudent.customMonthlyFee
           : (targetCourse?.fee?.monthly || 40);
-        setAmount(stdFee);
+        setAmount(stdFee * (selectedMonths.length || 1));
       } else if (paymentType === 'registration') {
         const regFee = selectedStudent.customRegistrationFee !== undefined && selectedStudent.customRegistrationFee !== null
           ? selectedStudent.customRegistrationFee
@@ -127,21 +164,7 @@ export function QuickPaymentModal({
         setAmount(regFee);
       }
     }
-  }, [selectedStudent, selectedCourseId, paymentType, studentCourses, courses]);
-
-  // Standard fee for reference buttons
-  const standardFee = useMemo(() => {
-    if (!selectedStudent) return 40;
-    const targetCourse = courses.find((c) => c.id === selectedCourseId);
-    if (paymentType === 'monthly') {
-      return selectedStudent.customMonthlyFee !== undefined && selectedStudent.customMonthlyFee !== null
-        ? selectedStudent.customMonthlyFee
-        : (targetCourse?.fee?.monthly || 40);
-    }
-    return selectedStudent.customRegistrationFee !== undefined && selectedStudent.customRegistrationFee !== null
-      ? selectedStudent.customRegistrationFee
-      : (targetCourse?.fee?.registration || 30);
-  }, [selectedStudent, selectedCourseId, paymentType, courses]);
+  }, [selectedStudent, selectedCourseId, paymentType, studentCourses, courses, selectedMonths.length]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -156,18 +179,27 @@ export function QuickPaymentModal({
 
     setSubmitting(true);
     try {
-      const monthName = MONTHS_OPTIONS.find((m) => Number(m.value) === month)?.label || `Mese ${month}`;
       const courseObj = courses.find((c) => c.id === selectedCourseId);
       
-      const description = paymentType === 'monthly'
-        ? `Pagamento ${monthName} ${year}${courseObj ? ` - ${courseObj.name}` : ''}`
-        : `Quota Iscrizione e Tesseramento Annuale ${year}/${year + 1}`;
+      let description = '';
+      if (paymentType === 'monthly') {
+        const mNames = selectedMonths
+          .map((m) => MONTHS_OPTIONS.find((o) => Number(o.value) === m)?.label || `Mese ${m}`)
+          .join(', ');
+        const courseName = courseObj ? ` (Corso: ${courseObj.name})` : '';
+        description = selectedMonths.length > 1
+          ? `Quota Mensile - Mesi di ${mNames} ${year}${courseName}`
+          : `Quota Mensile - Mese di ${mNames} ${year}${courseName}`;
+      } else {
+        description = `Quota Iscrizione e Tesseramento Annuale ${year}/${year + 1}`;
+      }
 
       const res = await registerDirectPayment({
         studentId: selectedStudent.id,
         courseId: selectedCourseId || undefined,
         type: paymentType,
-        month: paymentType === 'monthly' ? month : undefined,
+        month: selectedMonths[0],
+        months: selectedMonths,
         year,
         description,
         amount: Number(amount),
@@ -310,24 +342,61 @@ export function QuickPaymentModal({
           </div>
         </div>
 
-        {/* 3. DETTAGLI CORSO & MENSILITÀ */}
+        {/* 3. DETTAGLI CORSO & MENSILITÀ MULTIPLE */}
         {paymentType === 'monthly' && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-black/20 rounded-xl border border-white/5">
-            <Select
-              label="Corso di Ballo *"
-              value={selectedCourseId}
-              onChange={(e) => setSelectedCourseId(e.target.value)}
-              options={studentCourses.map((c) => ({
-                value: c.id,
-                label: `${c.name} (${c.fee?.monthly ? `€${c.fee.monthly}/m` : 'Tariffa scuola'})`,
-              }))}
-            />
-            <Select
-              label="Mese di Riferimento *"
-              value={String(month)}
-              onChange={(e) => setMonth(Number(e.target.value))}
-              options={MONTHS_OPTIONS}
-            />
+          <div className="space-y-3 p-3.5 bg-black/20 rounded-xl border border-white/5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Select
+                label="Corso di Ballo *"
+                value={selectedCourseId}
+                onChange={(e) => setSelectedCourseId(e.target.value)}
+                options={studentCourses.map((c) => ({
+                  value: c.id,
+                  label: `${c.name} (${c.fee?.monthly ? `€${c.fee.monthly}/m` : 'Tariffa scuola'})`,
+                }))}
+              />
+              <Select
+                label="Anno di Riferimento *"
+                value={String(year)}
+                onChange={(e) => setYear(Number(e.target.value))}
+                options={[
+                  { value: String(new Date().getFullYear() - 1), label: String(new Date().getFullYear() - 1) },
+                  { value: String(new Date().getFullYear()), label: String(new Date().getFullYear()) },
+                  { value: String(new Date().getFullYear() + 1), label: String(new Date().getFullYear() + 1) },
+                ]}
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-white/80">
+                  Mensilità da Saldare (seleziona più mesi per ricevuta unica):
+                </label>
+                <span className="text-[11px] text-brand-300 font-medium">
+                  {selectedMonths.length} {selectedMonths.length === 1 ? 'mese selezionato' : 'mesi selezionati'}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-6 gap-1.5">
+                {MONTHS_OPTIONS.map((m) => {
+                  const mNum = Number(m.value);
+                  const isSelected = selectedMonths.includes(mNum);
+                  return (
+                    <button
+                      key={m.value}
+                      type="button"
+                      onClick={() => toggleMonth(mNum)}
+                      className={`py-1.5 px-2 rounded-lg text-xs font-medium transition-all text-center border cursor-pointer ${
+                        isSelected
+                          ? 'bg-brand-500 text-white border-brand-400 font-bold shadow-sm'
+                          : 'bg-white/5 text-white/60 hover:text-white hover:bg-white/10 border-white/5'
+                      }`}
+                    >
+                      {m.label.slice(0, 3)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         )}
 

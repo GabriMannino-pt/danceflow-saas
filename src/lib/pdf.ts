@@ -18,6 +18,33 @@ function formatDate(date: any, formatStr: string = 'dd/MM/yyyy'): string {
   }
 }
 
+export function getSchoolFiscalInfo(school?: School | null) {
+  const isTropical = !school || !school.name || school.name.toLowerCase().includes('tropical') || school.id === 'OFLsxTdw5F2aHEvlj1RU';
+  
+  const brandName = isTropical ? 'Tropical Style Caribbean School' : (school?.name || 'Scuola di Danza');
+  const legalName = (school as any)?.legalName || (isTropical ? 'S.S.D. ARL LATIN GROUP' : (school?.name || ''));
+  const taxId = (school as any)?.taxId || (school as any)?.vatNumber || (school as any)?.fiscalCode || (isTropical ? '05523810876' : '');
+  const street = (isTropical && (!school?.address?.street || school.address.street.includes('Boccaccio')))
+    ? 'Via Carlo Goldoni, snc'
+    : (school?.address?.street || 'Via Carlo Goldoni, snc');
+  const postalCode = (isTropical && !school?.address?.postalCode) ? '95032' : (school?.address?.postalCode || '95032');
+  const city = (isTropical && (!school?.address?.city || school.address.city.includes('Paternò'))) ? 'Belpasso' : (school?.address?.city || 'Belpasso');
+  const province = (isTropical && !school?.address?.province) ? 'CT' : (school?.address?.province || 'CT');
+  
+  return {
+    brandName,
+    legalName,
+    taxId,
+    street,
+    city,
+    province,
+    postalCode,
+    fullAddress: `${street} - ${postalCode} ${city} (${province})`,
+    email: isTropical ? 'info@tropicalstyle.it' : (school?.contact?.email && !school.contact.email.includes('gabri.mannino') ? school.contact.email : ''),
+    phone: isTropical ? '' : (school?.contact?.phone && !school.contact.phone.includes('3939478583') ? school.contact.phone : ''),
+  };
+}
+
 export async function generateReceiptPDF(
   payment: Payment,
   student: Student,
@@ -28,87 +55,113 @@ export async function generateReceiptPDF(
   const doc = new jsPDF();
   const pageWidth = doc.internal.pageSize.getWidth();
   const primaryColor: [number, number, number] = [139, 92, 246]; // Brand Purple
+  const fiscal = getSchoolFiscalInfo(school);
 
   // --- HEADER ---
   doc.setFillColor(243, 244, 246);
-  doc.rect(20, 20, 30, 30, 'F');
-  if (school.logoURL) {
+  doc.rect(20, 18, 30, 30, 'F');
+  if (school?.logoURL) {
     // Logo loading could be done here if needed
   } else {
-    doc.setFontSize(10);
+    doc.setFontSize(9);
     doc.setTextColor(150, 150, 150);
-    doc.text('LOGO', 35, 36, { align: 'center' });
+    doc.text('LOGO', 35, 34, { align: 'center' });
   }
 
-  // School Info
+  // School Brand Name
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(18);
+  doc.setFontSize(14);
   doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.text(school.name, 60, 30);
+  doc.text(fiscal.brandName, 56, 25);
   
+  // Ragione Sociale Ufficiale
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10.5);
+  doc.setTextColor(30, 41, 59);
+  doc.text(fiscal.legalName, 56, 31);
+
+  // Indirizzo Sede Legale & Dati Fiscali
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  doc.setTextColor(100, 100, 100);
-  doc.text(school.address?.street || 'Indirizzo non specificato', 60, 37);
-  doc.text(`${school.address?.postalCode || ''} ${school.address?.city || ''} (${school.address?.province || ''})`, 60, 42);
-  doc.text(`Email: ${school.contact.email} | Tel: ${school.contact.phone || 'Non specificato'}`, 60, 47);
-  doc.text(`P.IVA/CF: ${school.contact.website || 'Non specificato'}`, 60, 52);
+  doc.setFontSize(8.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text(fiscal.fullAddress, 56, 37);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Cod. Fisc. / P. IVA: ${fiscal.taxId}`, 56, 43);
+
+  if (fiscal.email) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Email: ${fiscal.email}`, 56, 48);
+  }
 
   // Line separator
-  doc.setDrawColor(200, 200, 200);
-  doc.line(20, 58, pageWidth - 20, 58);
+  doc.setDrawColor(220, 226, 235);
+  doc.line(20, 52, pageWidth - 20, 52);
 
   // --- RECEIPT INFO ---
-  doc.setFontSize(14);
+  doc.setFontSize(13);
   doc.setFont('helvetica', 'bold');
-  doc.setTextColor(0, 0, 0);
+  doc.setTextColor(15, 23, 42);
   
   const isInstallment = !!installment;
-  doc.text(isInstallment ? 'RICEVUTA DI ACCONTO / VERSAMENTO PARZIALE' : 'RICEVUTA DI PAGAMENTO', 20, 70);
+  doc.text(isInstallment ? 'RICEVUTA DI ACCONTO / VERSAMENTO PARZIALE' : 'RICEVUTA DI PAGAMENTO', 20, 63);
 
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   doc.setFont('helvetica', 'normal');
-  doc.text(`Ricevuta N°: ${payment.receiptNumber || 'N/D'}`, pageWidth - 20, 68, { align: 'right' });
-  doc.text(`Data Emissione: ${isInstallment ? formatDate(installment.date) : formatDate(payment.paidAt || new Date())}`, pageWidth - 20, 74, { align: 'right' });
+  doc.setTextColor(71, 85, 105);
+  doc.text(`Ricevuta N°: ${payment.receiptNumber || 'N/D'}`, pageWidth - 20, 61, { align: 'right' });
+  doc.text(`Data Emissione: ${isInstallment ? formatDate(installment.date) : formatDate(payment.paidAt || new Date())}`, pageWidth - 20, 67, { align: 'right' });
 
   // --- STUDENT INFO ---
-  doc.setFillColor(249, 250, 251);
-  doc.rect(20, 82, pageWidth - 40, 32, 'F');
+  doc.setFillColor(248, 250, 252);
+  doc.setDrawColor(226, 232, 240);
+  doc.rect(20, 74, pageWidth - 40, 30, 'FD');
   
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   doc.setFont('helvetica', 'bold');
-  doc.text('Intestatario / Allievo:', 25, 90);
+  doc.setTextColor(30, 41, 59);
+  doc.text('Intestatario / Allievo:', 25, 82);
   doc.setFont('helvetica', 'normal');
-  doc.text(`${student.lastName} ${student.firstName}`, 25, 96);
-  doc.text(`Codice Fiscale: ${student.fiscalCode || 'Non specificato'}`, 25, 102);
-  if (student.contact.parentName) {
-    doc.text(`Genitore: ${student.contact.parentName} (${student.contact.parentPhone || ''})`, 25, 108);
+  doc.text(`${(student.lastName || '').toUpperCase()} ${(student.firstName || '').toUpperCase()}`, 25, 88);
+  doc.text(`Codice Fiscale: ${(student.fiscalCode || 'Non specificato').toUpperCase()}`, 25, 94);
+  if (student.contact?.parentName) {
+    doc.text(`Genitore / Esercente Resp.: ${student.contact.parentName}`, 25, 100);
   }
 
   // --- PAYMENT DETAILS ---
-  doc.setFontSize(11);
+  doc.setFontSize(10.5);
   doc.setFont('helvetica', 'bold');
-  doc.text('Dettaglio Operazione:', 20, 130);
+  doc.setTextColor(15, 23, 42);
+  doc.text('Dettaglio Operazione:', 20, 118);
 
   // Table header
   doc.setFillColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.rect(20, 135, pageWidth - 40, 10, 'F');
+  doc.rect(20, 123, pageWidth - 40, 9, 'F');
   doc.setTextColor(255, 255, 255);
-  doc.text('Descrizione', 25, 142);
-  doc.text('Importo', pageWidth - 25, 142, { align: 'right' });
+  doc.setFontSize(9.5);
+  doc.text('Descrizione', 25, 129);
+  doc.text('Importo', pageWidth - 25, 129, { align: 'right' });
 
   // Table body
-  doc.setTextColor(0, 0, 0);
+  doc.setTextColor(15, 23, 42);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   
-  const yPos = 153;
+  const yPos = 142;
+  const monthNames = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
   let desc = payment.description;
-  if (payment.type === 'monthly' && payment.month && payment.year) {
-    const monthNames = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
-    desc = `Quota Mensile - Mese di ${monthNames[payment.month - 1]} ${payment.year}`;
+  if (payment.type === 'monthly') {
+    const pMonths: number[] = (payment as any).months || (payment.month ? [payment.month] : []);
+    if (pMonths.length > 1) {
+      const mNames = pMonths.map(m => monthNames[m - 1]).filter(Boolean).join(', ');
+      desc = `Quota Mensile - Mesi di ${mNames} ${payment.year || new Date().getFullYear()}`;
+    } else if (payment.month && payment.year) {
+      desc = `Quota Mensile - Mese di ${monthNames[payment.month - 1]} ${payment.year}`;
+    }
   }
-  if (course) {
+  if (course && !desc.includes(course.name)) {
     desc += ` (Corso: ${course.name})`;
   }
 
@@ -118,19 +171,19 @@ export async function generateReceiptPDF(
   doc.text(`€ ${displayAmount.toFixed(2)}`, pageWidth - 25, yPos, { align: 'right' });
 
   // Summary lines
-  doc.setDrawColor(220, 220, 220);
-  doc.line(20, 165, pageWidth - 20, 165);
+  doc.setDrawColor(226, 232, 240);
+  doc.line(20, 155, pageWidth - 20, 155);
   
-  let summaryY = 175;
-  doc.setFontSize(10);
+  let summaryY = 166;
+  doc.setFontSize(9.5);
   
-  if (isInstallment || (payment.totalAmount && payment.totalAmount > displayAmount)) {
-    const total = payment.totalAmount ?? payment.amount;
-    const paidSoFar = payment.paidAmount ?? displayAmount;
-    const remaining = payment.remainingAmount ?? (total - paidSoFar);
+  const totalDue = payment.totalAmount ?? payment.amount ?? displayAmount;
+  const paidSoFar = payment.paidAmount ?? displayAmount;
+  const remaining = payment.remainingAmount !== undefined ? payment.remainingAmount : Math.max(0, totalDue - paidSoFar);
 
+  if (isInstallment || remaining > 0) {
     doc.text(`Importo Totale Dovuto:`, pageWidth - 100, summaryY);
-    doc.text(`€ ${total.toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
+    doc.text(`€ ${totalDue.toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
     
     summaryY += 6;
     doc.text(`Questo Versamento:`, pageWidth - 100, summaryY);
@@ -142,18 +195,18 @@ export async function generateReceiptPDF(
     doc.text(`Totale Già Pagato:`, pageWidth - 100, summaryY);
     doc.text(`€ ${paidSoFar.toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
 
-    summaryY += 8;
+    summaryY += 7;
     doc.setDrawColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-    doc.line(pageWidth - 100, summaryY - 4, pageWidth - 20, summaryY - 4);
+    doc.line(pageWidth - 100, summaryY - 3, pageWidth - 20, summaryY - 3);
     
     doc.setFont('helvetica', 'bold');
     doc.text(`DEBITO RESIDUO:`, pageWidth - 100, summaryY);
     doc.text(`€ ${Math.max(0, remaining).toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
   } else {
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(11);
+    doc.setFontSize(10.5);
     doc.text(`TOTALE PAGATO:`, pageWidth - 100, summaryY);
-    doc.text(`€ ${payment.amount.toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
+    doc.text(`€ ${displayAmount.toFixed(2)}`, pageWidth - 25, summaryY, { align: 'right' });
   }
 
   // Method
@@ -168,16 +221,16 @@ export async function generateReceiptPDF(
     other: 'Altro',
   };
   const activeMethod = isInstallment ? installment.method : payment.method;
-  doc.text(`Metodo di pagamento utilizzato: ${activeMethod ? methodMap[activeMethod] || activeMethod : 'N/D'}`, 20, 220);
+  doc.text(`Metodo di pagamento utilizzato: ${activeMethod ? methodMap[activeMethod] || activeMethod : 'N/D'}`, 20, 205);
   if (isInstallment && installment.notes) {
-    doc.text(`Note versamento: ${installment.notes}`, 20, 226);
+    doc.text(`Note versamento: ${installment.notes}`, 20, 211);
   } else if (payment.notes) {
-    doc.text(`Note: ${payment.notes}`, 20, 226);
+    doc.text(`Note: ${payment.notes}`, 20, 211);
   }
 
   // --- FOOTER ---
   doc.setFontSize(8);
-  doc.setTextColor(150, 150, 150);
+  doc.setTextColor(148, 163, 184);
   doc.text('Documento non valido ai fini fiscali come fattura elettronica ove prevista la sua obbligatorietà.', pageWidth / 2, 280, { align: 'center' });
 
   return doc;
@@ -593,6 +646,8 @@ export async function generateFilteredPaymentsPDF(
   const pageHeight = doc.internal.pageSize.getHeight();
   const primaryColor: [number, number, number] = [139, 92, 246];
 
+  const fiscal = getSchoolFiscalInfo(school);
+
   // Header School Info
   doc.setFillColor(243, 244, 246);
   doc.rect(15, 15, 25, 25, 'F');
@@ -601,16 +656,19 @@ export async function generateFilteredPaymentsPDF(
   doc.text('LOGO', 27.5, 29, { align: 'center' });
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
+  doc.setFontSize(14);
   doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.text(school.name, 45, 23);
+  doc.text(fiscal.brandName, 45, 22);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  doc.setTextColor(30, 41, 59);
+  doc.text(fiscal.legalName, 45, 27);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
   doc.setTextColor(100, 100, 100);
-  doc.text(school.address?.street || 'Indirizzo non specificato', 45, 28);
-  doc.text(`${school.address?.postalCode || ''} ${school.address?.city || ''} (${school.address?.province || ''})`, 45, 32);
-  doc.text(`Email: ${school.contact.email} | Tel: ${school.contact.phone || 'Non specificato'}`, 45, 36);
+  doc.text(`${fiscal.fullAddress} | C.F./P.IVA: ${fiscal.taxId}`, 45, 32);
 
   // Report details
   doc.setFont('helvetica', 'bold');
@@ -776,6 +834,8 @@ export async function generateStudentHistoryPDF(
   const pageHeight = doc.internal.pageSize.getHeight();
   const primaryColor: [number, number, number] = [139, 92, 246];
 
+  const fiscal = getSchoolFiscalInfo(school);
+
   // Intestazione scuola
   doc.setFillColor(243, 244, 246);
   doc.rect(20, 20, 25, 25, 'F');
@@ -784,16 +844,19 @@ export async function generateStudentHistoryPDF(
   doc.text('LOGO', 32.5, 34, { align: 'center' });
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
+  doc.setFontSize(14);
   doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.text(school.name, 50, 28);
+  doc.text(fiscal.brandName, 50, 25);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(30, 41, 59);
+  doc.text(fiscal.legalName, 50, 30);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
+  doc.setFontSize(8.5);
   doc.setTextColor(100, 100, 100);
-  doc.text(school.address?.street || 'Indirizzo non specificato', 50, 34);
-  doc.text(`${school.address?.postalCode || ''} ${school.address?.city || ''} (${school.address?.province || ''})`, 50, 39);
-  doc.text(`P.IVA/CF: ${school.contact.website || 'Non specificato'}`, 50, 44);
+  doc.text(`${fiscal.fullAddress} | C.F./P.IVA: ${fiscal.taxId}`, 50, 36);
 
   // Line separator
   doc.setDrawColor(200, 200, 200);

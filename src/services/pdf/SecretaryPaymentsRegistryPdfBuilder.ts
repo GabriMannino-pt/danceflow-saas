@@ -35,7 +35,6 @@ export function generateSecretaryPaymentsRegistryPDF(options: SecretaryRegistryO
   });
 
   const pageWidth = 297;
-  const pageHeight = 210;
   const marginX = 10;
   const marginTop = 10;
   const contentWidth = pageWidth - marginX * 2; // 277mm

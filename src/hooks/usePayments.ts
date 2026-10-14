@@ -126,7 +126,8 @@ export function usePayments() {
     method: PaymentMethod,
     date: Date,
     notes: string,
-    emitReceipt: boolean
+    emitReceipt: boolean,
+    markAsFullSettlement: boolean = false
   ) {
     if (!schoolId) throw new Error('Not authenticated to a school');
     try {
@@ -141,20 +142,23 @@ export function usePayments() {
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
       
-      const totalAmount = p.totalAmount ?? p.amount ?? (
-        isMonthly && hasCustomFee
-          ? student.customMonthlyFee!
-          : (isMonthly && course?.fee?.monthly)
-            ? course.fee.monthly
-            : 0
-      );
-
       const prevPaid = p.paidAmount ?? 0;
       const newPaid = prevPaid + installmentAmount;
-      const remainingAmount = Math.max(0, totalAmount - newPaid);
+
+      const totalAmount = markAsFullSettlement
+        ? newPaid
+        : (p.totalAmount ?? p.amount ?? (
+            isMonthly && hasCustomFee
+              ? student.customMonthlyFee!
+              : (isMonthly && course?.fee?.monthly)
+                ? course.fee.monthly
+                : 0
+          ));
+
+      const remainingAmount = markAsFullSettlement ? 0 : Math.max(0, totalAmount - newPaid);
 
       let status: Payment['status'] = 'pending';
-      if (newPaid >= totalAmount) {
+      if (markAsFullSettlement || newPaid >= totalAmount) {
         status = 'paid';
       } else if (newPaid > 0) {
         status = 'deposit_paid';
@@ -177,6 +181,7 @@ export function usePayments() {
       const history = p.payments ? [...p.payments, newInstallment] : [newInstallment];
 
       const updates: Partial<Payment> = {
+        amount: totalAmount,
         totalAmount,
         paidAmount: newPaid,
         remainingAmount,
@@ -188,6 +193,8 @@ export function usePayments() {
       if (status === 'paid') {
         updates.paidAt = nowTimestamp();
         updates.method = method;
+        updates.amount = newPaid;
+        updates.totalAmount = newPaid;
       }
       if (receiptNumber) {
         updates.receiptNumber = receiptNumber;
@@ -510,6 +517,7 @@ export function usePayments() {
     courseId?: string;
     type: 'monthly' | 'registration';
     month?: number;
+    months?: number[];
     year?: number;
     description: string;
     amount: number;
@@ -540,6 +548,8 @@ export function usePayments() {
         notes: data.notes || undefined,
       };
 
+      const primaryMonth = data.month || (data.months && data.months.length > 0 ? data.months[0] : undefined);
+
       const newPayment: Payment = {
         id: paymentRef.id,
         schoolId,
@@ -547,7 +557,8 @@ export function usePayments() {
         ...(parentId ? { parentId } : {}),
         courseId: data.courseId || undefined,
         type: data.type,
-        month: data.month,
+        month: primaryMonth,
+        months: data.months,
         year: data.year || new Date().getFullYear(),
         description: data.description.trim(),
         amount: data.amount,
@@ -567,6 +578,39 @@ export function usePayments() {
       };
 
       await setDoc(paymentRef, newPayment);
+
+      // If multi-month or monthly payment, also settle any existing pending fees for this student/months
+      const monthsToSettle = data.months || (data.month ? [data.month] : []);
+      if (data.type === 'monthly' && monthsToSettle.length > 0) {
+        const batch = writeBatch(db);
+        let hasBatchUpdates = false;
+        payments.forEach((p) => {
+          if (
+            p.id !== paymentRef.id &&
+            p.studentId === data.studentId &&
+            p.type === 'monthly' &&
+            p.year === (data.year || new Date().getFullYear()) &&
+            p.month &&
+            monthsToSettle.includes(p.month) &&
+            p.status !== 'paid' &&
+            p.status !== 'cancelled'
+          ) {
+            const pRef = doc(db, COLLECTIONS.payments(schoolId), p.id);
+            batch.update(pRef, {
+              status: 'paid',
+              paidAmount: p.totalAmount ?? p.amount,
+              remainingAmount: 0,
+              paidAt: timestampDate,
+              notes: `Saldato con Ricevuta N° ${receiptNumber || 'N/D'}`,
+              updatedAt: nowTimestamp(),
+            });
+            hasBatchUpdates = true;
+          }
+        });
+        if (hasBatchUpdates) {
+          await batch.commit();
+        }
+      }
 
       // If registration fee, update student
       if (data.type === 'registration') {

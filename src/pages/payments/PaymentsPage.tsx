@@ -99,6 +99,7 @@ export default function PaymentsPage() {
   const [payNotes, setPayNotes] = useState<string>('');
   const [payMethod, setPayMethod] = useState<PaymentMethod>('cash');
   const [payEmitReceipt, setPayEmitReceipt] = useState(false);
+  const [payAsFullSettlement, setPayAsFullSettlement] = useState(false);
 
   // Initialize values when opening payment modal
   useEffect(() => {
@@ -107,6 +108,7 @@ export default function PaymentsPage() {
       setPayDate(new Date().toISOString().split('T')[0]);
       setPayNotes('');
       setPayEmitReceipt(false);
+      setPayAsFullSettlement(false);
     }
   }, [payingPayment]);
 
@@ -276,7 +278,7 @@ export default function PaymentsPage() {
       return;
     }
     const maxAllowed = payingPayment.remainingAmount ?? payingPayment.amount;
-    if (payAmount > maxAllowed) {
+    if (!payAsFullSettlement && payAmount > maxAllowed) {
       toast.error(`L'importo inserito (€${payAmount}) supera il debito residuo (€${maxAllowed}).`);
       return;
     }
@@ -288,7 +290,8 @@ export default function PaymentsPage() {
         payMethod,
         new Date(payDate),
         payNotes,
-        payEmitReceipt
+        payEmitReceipt,
+        payAsFullSettlement
       );
       
       if (payEmitReceipt && res) {
@@ -1149,6 +1152,20 @@ export default function PaymentsPage() {
               value={payAmount}
               onChange={(e) => setPayAmount(Number(e.target.value))}
             />
+
+            {payAmount < (payingPayment?.remainingAmount ?? payingPayment?.amount ?? 0) && (
+              <label className="flex items-center gap-2.5 p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={payAsFullSettlement}
+                  onChange={(e) => setPayAsFullSettlement(e.target.checked)}
+                  className="rounded border-amber-400 text-brand-500 focus:ring-brand-500"
+                />
+                <span>
+                  Quota a <strong>saldo definitivo pattuito</strong> (chiude la retta a saldo senza generare debito residuo)
+                </span>
+              </label>
+            )}
 
             <Select
               label="Metodo di Pagamento"
