@@ -46,6 +46,9 @@
   /* Border Radius */
   --radius-2xl: 1rem;
   --radius-3xl: 1.5rem;
+
+  /* Custom Breakpoints */
+  --breakpoint-xs: 400px;
 }
 
 /* ─── Base ───────────────────────────────────────────────────────── */

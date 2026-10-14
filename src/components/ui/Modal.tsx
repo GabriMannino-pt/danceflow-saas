@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -40,7 +41,7 @@ export function Modal({ isOpen, onClose, title, description, children, size = 'm
 
   if (!isOpen) return null;
 
-  return (
+  return createPortal(
     <div
       className='fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4'
       role='dialog'
@@ -59,7 +60,7 @@ export function Modal({ isOpen, onClose, title, description, children, size = 'm
       {/* Panel */}
       <div
         className={cn(
-          'relative w-full glass-strong rounded-3xl shadow-2xl max-h-[90vh] flex flex-col overflow-hidden',
+          'relative w-full glass-strong rounded-3xl shadow-2xl max-h-[85vh] flex flex-col overflow-y-auto',
           'animate-fade-in-up',
           sizeClasses[size],
           className
@@ -92,7 +93,8 @@ export function Modal({ isOpen, onClose, title, description, children, size = 'm
         {/* Content */}
         <div className='p-5 overflow-y-auto flex-1'>{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

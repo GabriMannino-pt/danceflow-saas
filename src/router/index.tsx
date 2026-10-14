@@ -1,13 +1,12 @@
 import React, { lazy, Suspense } from 'react';
-import { createBrowserRouter, RouterProvider, Outlet } from 'react-router-dom';
-import { AuthGuard, GuestGuard, RoleGuard, SuperAdminGuard } from '@/components/guards/RoleGuard';
+import { createBrowserRouter, RouterProvider, Outlet, Navigate } from 'react-router-dom';
+import { AuthGuard, GuestGuard, RoleGuard } from '@/components/guards/RoleGuard';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { PageSkeleton } from '@/components/ui/Skeleton';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 
 // ─── Lazy page imports ────────────────────────────────────────────────────────
 const LoginPage          = lazy(() => import('@/pages/auth/LoginPage'));
-const RegisterPage       = lazy(() => import('@/pages/auth/RegisterPage'));
 const DashboardPage      = lazy(() => import('@/pages/dashboard/DashboardPage'));
 const StudentsPage       = lazy(() => import('@/pages/students/StudentsPage'));
 const StudentDetailPage  = lazy(() => import('@/pages/students/StudentDetailPage'));
@@ -30,9 +29,9 @@ const JoinStaffPage      = lazy(() => import('@/pages/auth/JoinStaffPage'));
 const PrivacyPage        = lazy(() => import('@/pages/public/PrivacyPage'));
 const TermsPage          = lazy(() => import('@/pages/public/TermsPage'));
 const SuspendedPage      = lazy(() => import('@/pages/errors/SuspendedPage'));
-const SuperAdminDashboardPage = lazy(() => import('@/pages/superadmin/SuperAdminDashboardPage'));
-const SuperAdminSchoolsPage   = lazy(() => import('@/pages/superadmin/SuperAdminSchoolsPage'));
-const LandingPage        = lazy(() => import('@/pages/public/LandingPage'));
+// const LandingPage = lazy(() => import('@/pages/public/LandingPage')); // unused
+const AcademicYearWizard  = lazy(() => import('@/pages/settings/AcademicYearWizard'));
+const CostumeOrdersPage   = lazy(() => import('@/pages/costumes/CostumeOrdersPage'));
 
 // ─── Lazy wrapper ─────────────────────────────────────────────────────────────
 function Lazy({ children }: { children: React.ReactNode }) {
@@ -56,19 +55,11 @@ const router = createBrowserRouter([
   },
   {
     path: '/register',
-    element: (
-      <GuestGuard>
-        <Lazy><RegisterPage /></Lazy>
-      </GuestGuard>
-    ),
+    element: <Navigate to='/login' replace />,
   },
   {
     path: '/join/:token',
-    element: (
-      <GuestGuard>
-        <Lazy><JoinSchoolPage /></Lazy>
-      </GuestGuard>
-    ),
+    element: <Lazy><JoinSchoolPage /></Lazy>,
   },
   {
     path: '/join-staff/:token',
@@ -95,10 +86,14 @@ const router = createBrowserRouter([
     ),
   },
 
-  // ── Public landing page at root
+  // ── Root page: direct to Tropical Style Login / Dashboard
   {
     path: '/',
-    element: <Lazy><LandingPage /></Lazy>,
+    element: (
+      <GuestGuard>
+        <Lazy><LoginPage /></Lazy>
+      </GuestGuard>
+    ),
   },
 
   // ── Admin / Teacher routes (with AppLayout, protected)
@@ -113,16 +108,51 @@ const router = createBrowserRouter([
     children: [
       { path: 'dashboard', element: <Lazy><DashboardPage /></Lazy> },
 
-      // Students
-      { path: 'students',           element: <Lazy><StudentsPage /></Lazy> },
-      { path: 'students/:id',       element: <Lazy><StudentDetailPage /></Lazy> },
+      // Students (admin / owner / superadmin only)
+      {
+        path: 'students',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']} redirectTo="/attendance">
+            <Lazy><StudentsPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'students/:id',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']} redirectTo="/attendance">
+            <Lazy><StudentDetailPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
 
-      // Courses
-      { path: 'courses',            element: <Lazy><CoursesPage /></Lazy> },
-      { path: 'courses/:id',        element: <Lazy><CourseDetailPage /></Lazy> },
+      // Courses (admin / owner / superadmin only)
+      {
+        path: 'courses',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']} redirectTo="/attendance">
+            <Lazy><CoursesPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'courses/:id',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']} redirectTo="/attendance">
+            <Lazy><CourseDetailPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
 
-      // Payments
-      { path: 'payments',           element: <Lazy><PaymentsPage /></Lazy> },
+      // Payments (admin / owner only)
+      {
+        path: 'payments',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']}>
+            <Lazy><PaymentsPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
 
       // Attendance
       { path: 'attendance',         element: <Lazy><AttendancePage /></Lazy> },
@@ -137,12 +167,23 @@ const router = createBrowserRouter([
       { path: 'events',             element: <Lazy><EventsPage /></Lazy> },
       { path: 'events/:id',         element: <Lazy><EventDetailPage /></Lazy> },
 
+      // Costumes
+      { path: 'costumes',           element: <Lazy><CostumeOrdersPage /></Lazy> },
+
       // Settings & Profile (admin only for settings)
       {
         path: 'settings',
         element: (
           <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']}>
             <Lazy><SettingsPage /></Lazy>
+          </RoleGuard>
+        ),
+      },
+      {
+        path: 'settings/academic-year-wizard',
+        element: (
+          <RoleGuard allowedRoles={['admin', 'superadmin', 'owner']}>
+            <Lazy><AcademicYearWizard /></Lazy>
           </RoleGuard>
         ),
       },
@@ -158,22 +199,6 @@ const router = createBrowserRouter([
         <Lazy><ParentPortalPage /></Lazy>
       </RoleGuard>
     ),
-  },
-
-  // ── SuperAdmin portal (cabina di regia)
-  {
-    path: '/superadmin',
-    element: (
-      <SuperAdminGuard>
-        <AppLayout>
-          <Outlet />
-        </AppLayout>
-      </SuperAdminGuard>
-    ),
-    children: [
-      { path: 'dashboard', element: <Lazy><SuperAdminDashboardPage /></Lazy> },
-      { path: 'schools', element: <Lazy><SuperAdminSchoolsPage /></Lazy> },
-    ],
   },
 
   // ── Suspended tenant warning page

@@ -1,8 +1,12 @@
-import { useEffect } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useStudents } from '@/hooks/useStudents';
+import { useSchoolStore } from '@/stores/schoolStore';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import toast from 'react-hot-toast';
 import { Modal, ModalFooter, Input, Textarea, Select, Button } from '@/components/ui';
 import { toTimestamp } from '@/lib/converters';
 import type { Student } from '@/types';
@@ -34,8 +38,8 @@ const studentFormSchema = z
       parentPhone: z.string().optional(),
       parentEmail: z.string().optional(),
       parentRelation: z.enum(['madre', 'padre', 'tutore', 'altro', '']).optional(),
-      emergencyContact: z.string().min(2, 'Il contatto di emergenza è obbligatorio'),
-      emergencyPhone: z.string().min(5, 'Il telefono di emergenza è obbligatorio'),
+      emergencyContact: z.string().optional().or(z.literal('')),
+      emergencyPhone: z.string().optional().or(z.literal('')),
     }),
     medicalInfo: z.object({
       allergies: z.string().optional(),
@@ -114,6 +118,7 @@ interface StudentFormProps {
 
 export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentFormProps) {
   const { createStudent, editStudent } = useStudents();
+  const { students, activeSchool } = useSchoolStore();
 
   // ─── Default values setup ──────────────────────────────────────────────────
   const defaultValues: Partial<StudentFormValues> = {
@@ -166,6 +171,21 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
   // Watch fields for dynamic visibility checks
   const dobWatch = useWatch({ control, name: 'dateOfBirth' });
   const medicalClearanceWatch = useWatch({ control, name: 'medicalInfo.medicalClearance' });
+  const fiscalCodeWatch = useWatch({ control, name: 'fiscalCode' });
+
+  // Anti-duplicate CF check
+  const duplicateStudent = useMemo(() => {
+    if (!fiscalCodeWatch) return null;
+    const clean = fiscalCodeWatch.trim().toUpperCase();
+    if (clean.length < 11) return null;
+    return students.find(
+      (s) =>
+        s.id !== student?.id &&
+        !s.isDeleted &&
+        s.fiscalCode &&
+        s.fiscalCode.trim().toUpperCase() === clean
+    );
+  }, [fiscalCodeWatch, students, student?.id]);
 
   // Calculate age
   let isMinor = false;
@@ -190,6 +210,34 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
   // ─── Submit Form ────────────────────────────────────────────────────────────
   async function onSubmit(data: StudentFormValues) {
     try {
+      if (data.fiscalCode) {
+        const cleanCF = data.fiscalCode.trim().toUpperCase();
+        const existingLocal = students.find(
+          (s) => s.id !== student?.id && !s.isDeleted && s.fiscalCode?.trim().toUpperCase() === cleanCF
+        );
+        if (existingLocal) {
+          toast.error(
+            `Codice Fiscale già associato all'allievo ${existingLocal.lastName.toUpperCase()} ${existingLocal.firstName.toUpperCase()}. Inserimento bloccato.`
+          );
+          return;
+        }
+        if (activeSchool?.id) {
+          try {
+            const cfSnap = await getDoc(doc(db, 'schools', activeSchool.id, 'fiscalCodesIndex', cleanCF));
+            if (cfSnap.exists()) {
+              const cfData = cfSnap.data();
+              if (cfData.studentId && cfData.studentId !== student?.id) {
+                toast.error(
+                  `Codice Fiscale già registrato presso la scuola per ${cfData.lastName?.toUpperCase() || ''} ${cfData.firstName?.toUpperCase() || ''}.`
+                );
+                return;
+              }
+            }
+          } catch (cfErr) {
+            console.warn('[StudentForm] CF check error:', cfErr);
+          }
+        }
+      }
       const studentData: Omit<Student, 'id' | 'schoolId' | 'createdAt' | 'updatedAt'> = {
         firstName: data.firstName.trim(),
         lastName: data.lastName.trim(),
@@ -216,8 +264,8 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
           parentRelation: isMinor
             ? (data.contact.parentRelation as 'madre' | 'padre' | 'tutore' | 'altro' | undefined)
             : undefined,
-          emergencyContact: data.contact.emergencyContact.trim(),
-          emergencyPhone: data.contact.emergencyPhone.trim(),
+          emergencyContact: data.contact.emergencyContact?.trim() || '',
+          emergencyPhone: data.contact.emergencyPhone?.trim() || '',
         },
         medicalInfo: {
           allergies: data.medicalInfo.allergies?.trim() || undefined,
@@ -289,12 +337,23 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
               error={errors.dateOfBirth?.message}
               {...register('dateOfBirth')}
             />
-            <Input
-              label='Codice Fiscale'
-              placeholder='16 caratteri'
-              error={errors.fiscalCode?.message}
-              {...register('fiscalCode')}
-            />
+            <div className='space-y-1'>
+              <Input
+                label='Codice Fiscale'
+                placeholder='16 caratteri'
+                error={
+                  duplicateStudent
+                    ? `CF già associato a ${duplicateStudent.lastName.toUpperCase()} ${duplicateStudent.firstName.toUpperCase()}`
+                    : errors.fiscalCode?.message
+                }
+                {...register('fiscalCode')}
+              />
+              {duplicateStudent && (
+                <p className='text-[11px] text-coral-400 font-medium bg-coral-500/10 border border-coral-500/20 p-2 rounded-lg'>
+                  ⚠️ Questo Codice Fiscale appartiene già all'allievo <strong>{duplicateStudent.lastName.toUpperCase()} {duplicateStudent.firstName.toUpperCase()}</strong>. Inserimento bloccato per evitare doppioni.
+                </p>
+              )}
+            </div>
           </div>
         </div>
 
@@ -400,19 +459,18 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
             </div>
           )}
 
-          {/* Emergency Contact */}
+          {/* Emergency Contact (Opzionale) */}
           <div className='grid grid-cols-1 md:grid-cols-2 gap-4 border border-white/5 p-4 rounded-2xl bg-white/2'>
             <Input
-              label='Contatto di Emergenza (Nome)'
-              required
+              label='Contatto di Emergenza (Nome, Opzionale)'
               placeholder='es. Nome Cognome (Zio)'
               error={errors.contact?.emergencyContact?.message}
               {...register('contact.emergencyContact')}
             />
             <Input
-              label='Telefono Contatto Emergenza'
+              label='Telefono Contatto Emergenza (Opzionale)'
               type='tel'
-              required
+              placeholder='es. 333 1234567'
               error={errors.contact?.emergencyPhone?.message}
               {...register('contact.emergencyPhone')}
             />
@@ -492,7 +550,7 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
           <Button type='button' variant='secondary' onClick={onClose}>
             Annulla
           </Button>
-          <Button type='submit' loading={isSubmitting}>
+          <Button type='submit' loading={isSubmitting} disabled={isSubmitting || !!duplicateStudent}>
             {student ? 'Salva Modifiche' : 'Registra Allievo'}
           </Button>
         </ModalFooter>

@@ -193,7 +193,7 @@ export default function OnboardingPage() {
       setUser(updatedUser);
       setActiveSchool(newSchool);
 
-      toast.success('Configurazione completata con successo! Benvenuto in DanceFlow.');
+      toast.success('Configurazione completata con successo! Benvenuto in Tropical Style.');
       navigate('/dashboard');
     } catch (err) {
       console.error('[Onboarding] Error during wizard setup:', err);
@@ -237,7 +237,7 @@ export default function OnboardingPage() {
         </div>
 
         <PageHeader
-          title='Benvenuto su DanceFlow 🚀'
+          title='Benvenuto su Tropical Style 🚀'
           subtitle='Configura i dati iniziali della tua scuola di danza in pochi istanti'
           actions={
             <Button variant='secondary' size='sm' onClick={handleLogout} icon={<LogOut size={16} />}>

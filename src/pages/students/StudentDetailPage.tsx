@@ -16,11 +16,12 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { StudentForm } from '@/components/students/StudentForm';
 import { MedicalStatusBadge } from '@/components/students/MedicalStatusBadge';
 import { generateReceiptPDF, generateStudentHistoryPDF } from '@/lib/pdf';
+import { generateRegistrationPdf } from '@/services/pdf/RegistrationPdfBuilder';
 import {
   COLLECTIONS, studentConverter, paymentConverter,
   attendanceConverter, courseConverter, nowTimestamp,
 } from '@/lib/converters';
-import { STORAGE_ENABLED } from '@/lib/constants';
+import { STORAGE_ENABLED, getAcademicYearOptions } from '@/lib/constants';
 import type { Student, Course, Payment, AttendanceRecord, StudentDocument, PaymentMethod } from '@/types';
 import { format, differenceInYears, isPast, isWithinInterval, addDays } from 'date-fns';
 import { it } from 'date-fns/locale';
@@ -28,8 +29,15 @@ import {
   Edit, BellRing, User, BookOpen, CreditCard,
   CheckSquare, FileText, Phone, Mail, MapPin, AlertTriangle,
   CheckCircle, XCircle, Upload, Download,
-  Shield, Heart, Clipboard, Clock, Trash2, Plus,
+  Shield, Heart, Clipboard, Clock, Trash2, Plus, MessageCircle
 } from 'lucide-react';
+import { 
+  openWhatsAppChat, 
+  getStudentWhatsAppPhone, 
+  buildPaymentReminderWhatsAppMessage,
+  buildMedicalReminderWhatsAppMessage,
+  buildFiscalCodeReminderWhatsAppMessage 
+} from '@/lib/whatsapp';
 import { usePayments } from '@/hooks/usePayments';
 
 // ─── Tab type ──────────────────────────────────────────────────────────────────
@@ -67,9 +75,15 @@ function getDocCount(student: Student): number {
 export default function StudentDetailPage() {
   const { id: studentId } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const schoolId = useAuthStore((s) => s.user?.schoolId);
+  const user = useAuthStore((s) => s.user);
+  const schoolId = user?.schoolId;
+  const isTeacher = user?.role === 'teacher';
   const { editStudent, sendDocumentReminder, uploadStudentDocument } = useStudents();
   const { students, updateStudent: _u } = useSchoolStore();
+
+  const availableTabs = useMemo(() => {
+    return isTeacher ? TABS.filter((t) => t.id !== 'pagamenti') : TABS;
+  }, [isTeacher]);
 
   const [activeTab, setActiveTab] = useState<Tab>('anagrafica');
   const [student, setStudent] = useState<Student | null>(null);
@@ -116,14 +130,16 @@ export default function StudentDetailPage() {
       setAllCourses(allC);
       setEnrolledCourses(allC.filter((c) => st.enrolledCourseIds?.includes(c.id)));
 
-      // Payments
-      const pSnap = await getDocs(
-        query(collection(db, COLLECTIONS.payments(sid)).withConverter(paymentConverter),
-          where('studentId', '==', stId))
-      );
-      const fetchedPayments = pSnap.docs.map((d) => d.data());
-      fetchedPayments.sort((a, b) => b.dueDate.toMillis() - a.dueDate.toMillis());
-      setPayments(fetchedPayments);
+      // Payments (only accessible by non-teachers / admin)
+      if (user?.role !== 'teacher') {
+        const pSnap = await getDocs(
+          query(collection(db, COLLECTIONS.payments(sid)).withConverter(paymentConverter),
+            where('studentId', '==', stId))
+        );
+        const fetchedPayments = pSnap.docs.map((d) => d.data());
+        fetchedPayments.sort((a, b) => b.dueDate.toMillis() - a.dueDate.toMillis());
+        setPayments(fetchedPayments);
+      }
 
       // Attendance
       const aSnap = await getDocs(
@@ -162,8 +178,46 @@ export default function StudentDetailPage() {
     finally { setSendingReminder(false); }
   }
 
+  function handleWhatsAppMedical() {
+    if (!student) return;
+    const phone = getStudentWhatsAppPhone(student);
+    if (!phone) {
+      toast.error(`Nessun recapito telefonico trovato per ${student.firstName}`);
+      return;
+    }
+    const isExpired = medStatus === 'expired';
+    const expiryDateStr = student.medicalInfo?.medicalClearanceExpiry 
+      ? format(student.medicalInfo.medicalClearanceExpiry.toDate(), 'dd/MM/yyyy') 
+      : null;
+    const message = buildMedicalReminderWhatsAppMessage({
+      parentName: student.contact?.parentName,
+      studentName: `${student.firstName} ${student.lastName}`,
+      isExpired,
+      expiryDateStr,
+      schoolName: 'Tropical Style Caribbean School',
+    });
+    openWhatsAppChat(phone, message);
+    toast.success(`Apertura WhatsApp per ${student.firstName}...`);
+  }
+
+  function handleWhatsAppFiscal() {
+    if (!student) return;
+    const phone = getStudentWhatsAppPhone(student);
+    if (!phone) {
+      toast.error(`Nessun recapito telefonico trovato per ${student.firstName}`);
+      return;
+    }
+    const message = buildFiscalCodeReminderWhatsAppMessage({
+      parentName: student.contact?.parentName,
+      studentName: `${student.firstName} ${student.lastName}`,
+      schoolName: 'Tropical Style Caribbean School',
+    });
+    openWhatsAppChat(phone, message);
+    toast.success(`Apertura WhatsApp per ${student.firstName}...`);
+  }
+
   // ─── Update Custom Fees ───────────────────────────────────────────────────────
-  async function handleUpdateCustomFees(fees: Partial<Student>) {
+  async function handleUpdateCustomFees(fees: { customMonthlyFee: number | null; customRegistrationFee: number | null; customShowFee: number | null }) {
     if (!student || !schoolId || !studentId) return;
     await editStudent(student.id, fees);
     void loadAll(schoolId, studentId);
@@ -183,19 +237,16 @@ export default function StudentDetailPage() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
-      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const total = (isMonthly && isFlatRate)
-        ? student.flatRateAmount!
-        : (isMonthly && hasCustomFee)
-          ? student.customMonthlyFee!
-          : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
-            ? student.customRegistrationFee
-            : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
-              ? student.customShowFee
-              : (isMonthly && course?.fee?.monthly)
-                ? course.fee.monthly
-                : (p.totalAmount ?? p.amount);
+      const total = (isMonthly && hasCustomFee)
+        ? student.customMonthlyFee!
+        : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
+          ? student.customRegistrationFee
+          : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
+            ? student.customShowFee
+            : (isMonthly && course?.fee?.monthly)
+              ? course.fee.monthly
+              : (p.totalAmount ?? p.amount);
       
       const paid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
       const remaining = Math.max(0, total - paid);
@@ -255,10 +306,34 @@ export default function StudentDetailPage() {
 
         {/* Back + Header */}
         <PageHeader
-          title={`${student.lastName} ${student.firstName}`}
+          title={`${student.lastName.toUpperCase()} ${student.firstName.toUpperCase()}`}
           subtitle={`${age} anni · ${enrolledCourses.map((c) => c.name).join(', ') || 'Nessun corso'}`}
           actions={
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
+              {medStatus !== 'valid' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<MessageCircle size={14} />}
+                  onClick={handleWhatsAppMedical}
+                  className="border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                  title="Sollecita certificato medico su WhatsApp"
+                >
+                  WhatsApp Medico
+                </Button>
+              )}
+              {!student.fiscalCode && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<MessageCircle size={14} />}
+                  onClick={handleWhatsAppFiscal}
+                  className="border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                  title="Richiedi Codice Fiscale su WhatsApp"
+                >
+                  WhatsApp Cod. Fisc.
+                </Button>
+              )}
               {docCount < 3 && (
                 <Button
                   variant="outline"
@@ -341,19 +416,21 @@ export default function StudentDetailPage() {
                 <p className="text-2xl font-display font-bold text-teal-400">{attendanceStats.rate}%</p>
                 <p className="text-xs text-white/40">Presenze</p>
               </div>
-              <div className="text-center">
-                <p className={`text-2xl font-display font-bold ${paymentStats.overdue > 0 ? 'text-coral-400' : 'text-white'}`}>
-                  €{paymentStats.overdue > 0 ? paymentStats.overdue : paymentStats.paid}
-                </p>
-                <p className="text-xs text-white/40">{paymentStats.overdue > 0 ? 'Scaduto' : 'Pagato'}</p>
-              </div>
+              {!isTeacher && (
+                <div className="text-center">
+                  <p className={`text-2xl font-display font-bold ${paymentStats.overdue > 0 ? 'text-coral-400' : 'text-white'}`}>
+                    €{paymentStats.overdue > 0 ? paymentStats.overdue : paymentStats.paid}
+                  </p>
+                  <p className="text-xs text-white/40">{paymentStats.overdue > 0 ? 'Scaduto' : 'Pagato'}</p>
+                </div>
+              )}
             </div>
           </div>
         </Card>
 
         {/* Tabs */}
         <div className="flex gap-1 p-1 bg-black/20 rounded-2xl border border-white/5 overflow-x-auto">
-          {TABS.map((tab) => (
+          {availableTabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
@@ -379,7 +456,7 @@ export default function StudentDetailPage() {
             onToggle={handleEnrollToggle}
           />
         )}
-        {activeTab === 'pagamenti' && student && (
+        {activeTab === 'pagamenti' && !isTeacher && student && (
           <PagamentiTab
             payments={resolvedPayments}
             stats={paymentStats}
@@ -617,7 +694,7 @@ function CorsiTab({
                   </div>
                 </div>
                 <Button variant="secondary" size="sm" onClick={() => onToggle(c.id)}>
-                  Iscrive
+                  Iscrivi
                 </Button>
               </div>
             ))}
@@ -635,7 +712,7 @@ function PagamentiTab({
   payments: Payment[];
   stats: { paid: number; overdue: number; pending: number };
   student: Student;
-  onUpdateCustomFees: (fees: Partial<Student>) => Promise<void>;
+  onUpdateCustomFees: (fees: { customMonthlyFee: number | null; customRegistrationFee: number | null; customShowFee: number | null }) => Promise<void>;
   onRefresh: () => void;
 }) {
   const { 
@@ -650,8 +727,6 @@ function PagamentiTab({
   const [feeInput, setFeeInput] = useState(student.customMonthlyFee?.toString() || '');
   const [registrationFeeInput, setRegistrationFeeInput] = useState(student.customRegistrationFee?.toString() || '');
   const [showFeeInput, setShowFeeInput] = useState(student.customShowFee?.toString() || '');
-  const [flatRateEnabled, setFlatRateEnabled] = useState(student.flatRateEnabled || false);
-  const [flatRateAmountInput, setFlatRateAmountInput] = useState(student.flatRateAmount?.toString() || '');
   const [selectedExportYear, setSelectedExportYear] = useState('2025-2026');
   const [saving, setSaving] = useState(false);
 
@@ -735,14 +810,6 @@ function PagamentiTab({
     const monthlyVal = feeInput.trim() === '' ? null : Number(feeInput);
     const regVal = registrationFeeInput.trim() === '' ? null : Number(registrationFeeInput);
     const showVal = showFeeInput.trim() === '' ? null : Number(showFeeInput);
-    const flatAmountVal = flatRateAmountInput.trim() === '' ? null : Number(flatRateAmountInput);
-
-    if (flatRateEnabled) {
-      if (flatAmountVal === null || isNaN(flatAmountVal) || flatAmountVal <= 0) {
-        toast.error("Inserisci un importo valido e maggiore di zero per la quota forfettaria.");
-        return;
-      }
-    }
 
     if ((monthlyVal !== null && isNaN(monthlyVal)) || 
         (regVal !== null && isNaN(regVal)) || 
@@ -753,11 +820,9 @@ function PagamentiTab({
     setSaving(true);
     try {
       await onUpdateCustomFees({
-        customMonthlyFee: flatRateEnabled ? null : monthlyVal,
+        customMonthlyFee: monthlyVal,
         customRegistrationFee: regVal,
         customShowFee: showVal,
-        flatRateEnabled,
-        flatRateAmount: flatRateEnabled ? flatAmountVal : null,
       });
       toast.success('Quote personalizzate salvate con successo!');
     } catch (err) {
@@ -778,6 +843,25 @@ function PagamentiTab({
       console.error(err);
       toast.error("Impossibile generare il PDF dello storico.");
     }
+  };
+
+  const handleSendWhatsAppPayment = (payment: Payment) => {
+    const phone = getStudentWhatsAppPhone(student);
+    if (!phone) {
+      toast.error(`Nessun recapito telefonico trovato per ${student.firstName}`);
+      return;
+    }
+    const amountDue = payment.remainingAmount ?? payment.amount;
+    const monthOrDesc = payment.description || (payment.month ? `Mese ${payment.month}` : 'quota');
+    const message = buildPaymentReminderWhatsAppMessage({
+      parentName: student.contact?.parentName,
+      studentName: `${student.firstName} ${student.lastName}`,
+      monthOrDescription: monthOrDesc,
+      amountDue,
+      schoolName: activeSchool?.name || 'Tropical Style Caribbean School',
+    });
+    openWhatsAppChat(phone, message);
+    toast.success(`Apertura WhatsApp per ${student.firstName}...`);
   };
 
   const handleDeleteInstallmentClick = async (paymentId: string, index: number) => {
@@ -873,43 +957,14 @@ function PagamentiTab({
         <p className="text-xs text-white/50 mb-4">
           Imposta quote personalizzate per questo allievo (es. sconti fratelli). Lascia vuoto per utilizzare le tariffe standard.
         </p>
-
-        <div className="flex items-center space-x-3 mb-6 pb-4 border-b border-white/5">
-          <input
-            type="checkbox"
-            id="flatRateEnabled"
-            checked={flatRateEnabled}
-            onChange={(e) => setFlatRateEnabled(e.target.checked)}
-            className="rounded border-white/10 bg-surface-800 text-brand-500 focus:ring-brand-500 h-4 w-4"
-          />
-          <div>
-            <label htmlFor="flatRateEnabled" className="text-xs font-bold text-white cursor-pointer flex items-center gap-1.5">
-              <span>🔒 Attiva Quota Forfettaria (Flat Rate)</span>
-            </label>
-            <p className="text-[11px] text-white/40">Se attivo, l'allievo pagherà un importo fisso mensile fisso indipendentemente dal numero di corsi frequentati.</p>
-          </div>
-        </div>
-
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-          {flatRateEnabled ? (
-            <Input
-              type="number"
-              label="Importo Quota Forfettaria Mensile (€) *"
-              placeholder="Es. 80.00"
-              value={flatRateAmountInput}
-              onChange={(e) => setFlatRateAmountInput(e.target.value)}
-              className="border-brand-500/60 focus:border-brand-500"
-              required
-            />
-          ) : (
-            <Input
-              type="number"
-              label="Retta Mensile (€)"
-              placeholder="Es. 45.00"
-              value={feeInput}
-              onChange={(e) => setFeeInput(e.target.value)}
-            />
-          )}
+          <Input
+            type="number"
+            label="Retta Mensile (€)"
+            placeholder="Es. 45.00"
+            value={feeInput}
+            onChange={(e) => setFeeInput(e.target.value)}
+          />
           <Input
             type="number"
             label="Quota Iscrizione (€)"
@@ -943,11 +998,10 @@ function PagamentiTab({
             <Select
               value={selectedExportYear}
               onChange={(e) => setSelectedExportYear(e.target.value)}
-              options={[
-                { value: '2024-2025', label: 'A.A. 2024/2025' },
-                { value: '2025-2026', label: 'A.A. 2025/2026' },
-                { value: '2026-2027', label: 'A.A. 2026/2027' },
-              ]}
+              options={getAcademicYearOptions().map((o) => ({
+                value: o.value,
+                label: `A.A. ${o.label}`,
+              }))}
             />
           </div>
           <Button
@@ -1020,13 +1074,25 @@ function PagamentiTab({
                   <td className="py-3 px-5 text-right">
                     <div className="flex justify-end items-center gap-2">
                       {(p.status === 'pending' || p.status === 'deposit_paid' || p.status === 'overdue') && (
-                        <Button
-                          size="xs"
-                          onClick={() => setPayingPayment(p)}
-                          icon={<CheckCircle size={12} />}
-                        >
-                          Incassa
-                        </Button>
+                        <>
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            className="border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                            onClick={() => handleSendWhatsAppPayment(p)}
+                            icon={<MessageCircle size={12} />}
+                            title="Invia sollecito WhatsApp (senza IBAN)"
+                          >
+                            WhatsApp
+                          </Button>
+                          <Button
+                            size="xs"
+                            onClick={() => setPayingPayment(p)}
+                            icon={<CheckCircle size={12} />}
+                          >
+                            Incassa
+                          </Button>
+                        </>
                       )}
                       <Button
                         variant="outline"
@@ -1483,6 +1549,98 @@ function DocumentiTab({
   sendingReminder: boolean;
 }) {
   const [isGdprModalOpen, setIsGdprModalOpen] = useState(false);
+  const { activeSchool } = useSchoolStore();
+
+  const handleOpenStudentDocument = async (doc?: StudentDocument) => {
+    if (!doc) return;
+    const isConsent = doc.type === 'consent';
+    const isPlaceholder = doc.fileURL?.includes('placeholder-storage.local');
+
+    if (isConsent || isPlaceholder) {
+      try {
+        toast.loading('Generazione PDF Modulo Iscrizione...', { id: 'doc-pdf' });
+        const studentPdfData = {
+          firstName: student.firstName,
+          lastName: student.lastName,
+          gender: student.gender || 'M',
+          dateOfBirth: student.dateOfBirth,
+          fiscalCode: student.fiscalCode || '',
+          birthPlace: (student as any).birthPlace || '',
+          address: student.address || {
+            street: '',
+            city: '',
+            province: '',
+            postalCode: '',
+          },
+          contact: {
+            studentPhone: student.contact?.studentPhone,
+            studentEmail: student.contact?.studentEmail,
+            parentName: student.contact?.parentName,
+            parentRelation: student.contact?.parentRelation,
+            parentPhone: student.contact?.parentPhone,
+            parentEmail: student.contact?.parentEmail,
+            fiscalName: (student.contact as any)?.fiscalName,
+            fiscalCode: (student.contact as any)?.fiscalCode,
+          },
+        };
+
+        const schoolPdfData = {
+          name: activeSchool?.name || 'Tropical Style Caribbean School',
+          logoURL: activeSchool?.logoURL || '/tropical_logo.png',
+          address: activeSchool?.address,
+          contact: activeSchool?.contact,
+        };
+
+        const fesMetadata = {
+          ipAddress: student.signatureMetadata?.ipAddress || '127.0.0.1 (Verificato FES)',
+          timestamp: student.signatureMetadata?.timestamp
+            ? (typeof (student.signatureMetadata.timestamp as any).toMillis === 'function'
+                ? (student.signatureMetadata.timestamp as any).toMillis()
+                : typeof (student.signatureMetadata.timestamp as any).toDate === 'function'
+                  ? (student.signatureMetadata.timestamp as any).toDate().getTime()
+                  : new Date(student.signatureMetadata.timestamp as any).getTime())
+            : (doc.uploadedAt && typeof (doc.uploadedAt as any).toDate === 'function'
+                ? doc.uploadedAt.toDate().getTime()
+                : Date.now()),
+          userAgent: student.signatureMetadata?.userAgent || (typeof navigator !== 'undefined' ? navigator.userAgent : 'Mozilla/5.0'),
+          sessionId: student.signatureMetadata?.sessionId || student.id,
+        };
+
+        const signatureBase64 = (student as any).signatureBase64 || (student as any).signatureUrl || '';
+
+        const { blob } = await generateRegistrationPdf(
+          studentPdfData,
+          schoolPdfData,
+          signatureBase64,
+          fesMetadata,
+          '2025/2026'
+        );
+
+        const blobUrl = URL.createObjectURL(blob);
+        const fileName = `Modulo_Iscrizione_${student.lastName}_${student.firstName}.pdf`;
+
+        const newWindow = window.open(blobUrl, '_blank');
+        if (!newWindow || newWindow.closed || typeof newWindow.closed === 'undefined') {
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = fileName;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+        toast.success('PDF aperto con successo!', { id: 'doc-pdf' });
+        return;
+      } catch (err: any) {
+        console.error('Error generating doc PDF:', err);
+        toast.error('Errore nella generazione del documento PDF.', { id: 'doc-pdf' });
+        return;
+      }
+    }
+
+    if (doc.fileURL) {
+      window.open(doc.fileURL, '_blank');
+    }
+  };
 
   // Helper to format date/time of signature
   const getSignatureDateTime = () => {
@@ -1520,13 +1678,15 @@ function DocumentiTab({
           {DOC_TYPES.map(({ type, label, desc, icon }) => {
             const found = student.documents?.find((d) => d.type === type);
             const isConsent = type === 'consent';
+            const isConsentSigned = isConsent && (Boolean(found) || Boolean(student.sha256Hash) || Boolean(student.signatureMetadata));
+            const hasDoc = isConsent ? isConsentSigned : Boolean(found);
             const isMedical = type === 'medical';
             const isExpiring = isMedical && medStatus === 'expiring';
             const isExpired = isMedical && medStatus === 'expired';
 
             // Calculate dynamic badge
             let badgeComponent = null;
-            if (found) {
+            if (hasDoc) {
               if (isMedical) {
                 if (medStatus === 'expired') {
                   badgeComponent = <Badge variant="danger" size="sm" dot>Scaduto</Badge>;
@@ -1546,7 +1706,7 @@ function DocumentiTab({
             return (
               <div
                 key={type}
-                className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${found
+                className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${hasDoc
                     ? isExpired
                       ? 'bg-coral-500/5 border-coral-500/20'
                       : isExpiring
@@ -1556,7 +1716,7 @@ function DocumentiTab({
                   }`}
               >
                 <div className="flex items-center gap-3">
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${found
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${hasDoc
                       ? isExpired ? 'bg-coral-500/20 text-coral-400'
                         : isExpiring ? 'bg-gold-500/20 text-gold-400'
                           : 'bg-teal-500/20 text-teal-400'
@@ -1572,7 +1732,9 @@ function DocumentiTab({
                     <p className="text-xs text-white/40">
                       {found
                         ? `Caricato il ${format(found.uploadedAt.toDate(), 'dd/MM/yyyy')}`
-                        : desc}
+                        : isConsentSigned
+                          ? 'Firmato digitalmente con FES all\'iscrizione'
+                          : desc}
                     </p>
                     {isMedical && student.medicalInfo?.medicalClearanceExpiry && (
                       <p className={`text-xs font-medium ${isExpired ? 'text-coral-400' : isExpiring ? 'text-gold-400' : 'text-teal-400'
@@ -1585,7 +1747,7 @@ function DocumentiTab({
                 </div>
 
                 <div className="flex items-center gap-2">
-                  {found ? (
+                  {hasDoc ? (
                     <>
                       {isConsent && (
                         <button
@@ -1597,12 +1759,12 @@ function DocumentiTab({
                           <span>Verificato GDPR</span>
                         </button>
                       )}
-                      {found.fileURL && (
+                      {(found?.fileURL || isConsent) && (
                         <Button
                           variant="secondary"
                           size="sm"
                           icon={<Download size={13} />}
-                          onClick={() => window.open(found.fileURL, '_blank')}
+                          onClick={() => handleOpenStudentDocument(found || { id: 'consent', name: 'Modulo di Iscrizione', type: 'consent', fileURL: '', uploadedAt: student.updatedAt || student.createdAt || nowTimestamp() } as any)}
                         >
                           Apri
                         </Button>
@@ -1681,7 +1843,7 @@ function DocumentiTab({
                   </div>
                   {doc.fileURL && (
                     <Button variant="secondary" size="sm" icon={<Download size={13} />}
-                      onClick={() => window.open(doc.fileURL, '_blank')}>
+                      onClick={() => handleOpenStudentDocument(doc)}>
                       Apri
                     </Button>
                   )}
@@ -1782,7 +1944,8 @@ interface UploadModalProps {
     docType: StudentDocument['type'],
     fileName: string,
     notes?: string,
-    expiryDate?: Date
+    expiryDate?: Date,
+    isValidated?: boolean
   ) => Promise<StudentDocument | undefined>;
   onSuccess: () => void;
 }
@@ -1803,7 +1966,8 @@ function UploadDocumentModal({ isOpen, onClose, student, onUpload, onSuccess }: 
         docType,
         fileName.trim(),
         notes.trim() || undefined,
-        expiryDate ? new Date(expiryDate) : undefined
+        expiryDate ? new Date(expiryDate) : undefined,
+        true
       );
       onSuccess();
       setFileName(''); setNotes(''); setExpiryDate('');

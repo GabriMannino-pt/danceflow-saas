@@ -1,5 +1,5 @@
 // ─── App Constants ────────────────────────────────────────────────
-export const APP_NAME = 'DanceFlow' as const;
+export const APP_NAME = 'Tropical Style' as const;
 export const APP_VERSION = '1.0.0' as const;
 
 // Feature flags
@@ -27,12 +27,46 @@ export const DAYS_IT = [
   'Venerdì', 'Sabato', 'Domenica',
 ] as const;
 
-// Dance styles
+// Dance styles specific to Tropical Style
 export const DANCE_STYLES = [
-  'Danza Classica', 'Danza Moderna', 'Hip Hop', 'Contemporanea',
-  'Latino-Americano', 'Balli di Sala', 'Flamenco', 'Jazz', 'Acrobatica',
-  'Break Dance', 'Pole Dance', 'Tap', 'Musical', 'Altro',
+  'Danza Classica',
+  'Danza Moderna',
+  'Danza Contemporanea',
+  'Pilates',
+  'Zumba',
+  'Posturale',
+  'Caraibico Coppia',
+  'Reggaeton',
+  'Lady Style',
+  'Hip-Hop',
+  'Avviamento Caraibico',
+  'Altro...',
 ] as const;
+
+// Dynamic Academic Year Generator
+export function getAcademicYearOptions(startYear = 2023, futureOffset = 4) {
+  const currentYear = new Date().getFullYear();
+  const maxYear = Math.max(currentYear + futureOffset, 2030);
+  const options: { value: string; label: string }[] = [];
+  for (let y = startYear; y < maxYear; y++) {
+    options.push({
+      value: `${y}-${y + 1}`,
+      label: `${y}/${y + 1}`,
+    });
+  }
+  return options;
+}
+
+export function getCurrentAcademicYear(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth(); // 0-11, 7 is August, 8 is September
+  if (month >= 7) {
+    return `${year}-${year + 1}`;
+  } else {
+    return `${year - 1}-${year}`;
+  }
+}
 
 export const PLAN_LIMITS = {
   free: 20,

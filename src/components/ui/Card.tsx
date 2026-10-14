@@ -6,7 +6,8 @@ interface CardProps {
   className?: string;
   hover?: boolean;
   padding?: 'none' | 'sm' | 'md' | 'lg';
-  onClick?: () => void;
+  onClick?: (e?: React.MouseEvent) => void;
+  as?: 'div' | 'button';
 }
 
 const paddingClasses = {
@@ -16,8 +17,8 @@ const paddingClasses = {
   lg:   'p-5 md:p-6',
 };
 
-export function Card({ children, className, hover, padding = 'md', onClick }: CardProps) {
-  const Tag = onClick ? 'button' : 'div';
+export function Card({ children, className, hover, padding = 'md', onClick, as }: CardProps) {
+  const Tag = as || (onClick ? 'button' : 'div');
   return (
     <Tag
       onClick={onClick}

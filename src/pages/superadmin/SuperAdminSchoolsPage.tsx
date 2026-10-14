@@ -115,7 +115,11 @@ export default function SuperAdminSchoolsPage() {
                   return (
                     <tr
                       key={school.id}
-                      className="border-b border-white/5 hover:bg-white/[0.01] transition-colors"
+                      className={`border-b border-white/5 hover:bg-white/[0.01] transition-colors ${
+                        isSuspended
+                          ? 'opacity-40 bg-red-950/10 grayscale border-l-4 border-red-500'
+                          : ''
+                      }`}
                     >
                       <td className="py-4 px-5">
                         <div>

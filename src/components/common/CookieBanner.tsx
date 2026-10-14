@@ -23,7 +23,7 @@ export function CookieBanner() {
   if (!isOpen) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 left-4 md:left-auto md:max-w-md z-50 animate-fade-in-up">
+    <div className="fixed bottom-4 right-4 left-4 md:left-auto md:max-w-md z-40 animate-fade-in-up">
       <div className="glass-strong p-5 rounded-2xl border border-brand-500/20 bg-surface-900/95 text-white shadow-2xl flex flex-col gap-4">
         <div className="flex items-start gap-3">
           <div className="w-10 h-10 rounded-xl bg-brand-500/10 border border-brand-500/20 flex items-center justify-center text-brand-400 flex-shrink-0 mt-0.5 animate-pulse-glow">

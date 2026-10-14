@@ -168,6 +168,7 @@ export function PaymentForm({ isOpen, onClose, onSuccess }: PaymentFormProps) {
         
         await createPayment({
           studentId: stId,
+          parentId: studentObj?.parentId || undefined,
           courseId: data.courseId || undefined,
           type: data.type,
           description: data.description.trim(),

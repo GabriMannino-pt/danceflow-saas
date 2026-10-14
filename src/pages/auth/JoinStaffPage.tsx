@@ -17,6 +17,7 @@ interface InviteData {
   role: 'teacher' | 'admin';
   schoolId: string;
   schoolName: string;
+  courseIds?: string[];
   used: boolean;
 }
 
@@ -101,8 +102,26 @@ export default function JoinStaffPage() {
 
       await setDoc(userRef, newUser);
 
-      // 3. Temporary pre-registered account is automatically deleted during auth bootstrap (fetchOrCreateUser)
-      // No action needed here.
+      // 3. Assegna i corsi specificati nell'invito
+      if (invite.courseIds && invite.courseIds.length > 0) {
+        for (const cid of invite.courseIds) {
+          try {
+            const cRef = doc(db, COLLECTIONS.courses(invite.schoolId), cid);
+            const cSnap = await getDoc(cRef);
+            if (cSnap.exists()) {
+              const currentTeachers = (cSnap.data() as any).teacherIds || [];
+              if (!currentTeachers.includes(uid)) {
+                await updateDoc(cRef, {
+                  teacherIds: [...currentTeachers, uid],
+                  updatedAt: nowTimestamp(),
+                });
+              }
+            }
+          } catch (cErr) {
+            console.warn('[JoinStaff] Could not link course:', cid, cErr);
+          }
+        }
+      }
 
       // 4. Segna l'invito come utilizzato
       const inviteRef = doc(db, 'invites', token!);
@@ -174,11 +193,15 @@ export default function JoinStaffPage() {
         <div className='relative w-full max-w-md animate-fade-in-up py-8'>
           {/* Logo */}
           <div className='text-center mb-6'>
-            <div className='inline-flex items-center justify-center w-16 h-16 rounded-2xl btn-primary-gradient mb-3 animate-pulse-glow'>
-              <span className='text-3xl'>💃</span>
+            <div className='mb-3 inline-flex items-center justify-center px-5 py-3 rounded-2xl bg-white shadow-xl'>
+              <img
+                src='/tropical_logo.png'
+                alt='Tropical Style'
+                className='h-12 w-auto max-w-[200px] object-contain'
+              />
             </div>
-            <h1 className='text-2xl font-display font-bold gradient-text'>DanceFlow</h1>
-            <p className='text-white/50 text-xs mt-1'>Unisciti allo staff di {invite.schoolName}</p>
+            <h1 className='text-2xl font-display font-bold text-white'>Tropical Style</h1>
+            <p className='text-brand-400 text-xs mt-0.5 font-semibold uppercase tracking-wider'>Unisciti allo staff di {invite.schoolName}</p>
           </div>
 
           <Card className='p-6 space-y-6 border border-white/5'>
@@ -206,6 +229,7 @@ export default function JoinStaffPage() {
                   value={password}
                   onChange={(e: any) => setPassword(e.target.value)}
                   fullWidth
+                  autoComplete='new-password'
                 />
                 <button
                   type='button'
@@ -226,6 +250,7 @@ export default function JoinStaffPage() {
                   value={confirmPassword}
                   onChange={(e: any) => setConfirmPassword(e.target.value)}
                   fullWidth
+                  autoComplete='new-password'
                 />
                 <button
                   type='button'

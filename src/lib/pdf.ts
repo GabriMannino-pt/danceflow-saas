@@ -102,7 +102,7 @@ export async function generateReceiptPDF(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(10);
   
-  let yPos = 153;
+  const yPos = 153;
   let desc = payment.description;
   if (payment.type === 'monthly' && payment.month && payment.year) {
     const monthNames = ['Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno', 'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'];
@@ -246,7 +246,7 @@ export async function generateMeasurementsPDF(student: Student, school: School) 
   // Footer
   doc.setFontSize(8);
   doc.setTextColor(150, 150, 150);
-  doc.text(`Generato da DanceFlow il ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, pageWidth / 2, 280, { align: 'center' });
+  doc.text(`Generato da Tropical Style Caribbean School il ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, pageWidth / 2, 280, { align: 'center' });
 
   return doc;
 }

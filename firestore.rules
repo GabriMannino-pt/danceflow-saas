@@ -110,7 +110,7 @@ service cloud.firestore {
       allow create: if isAuthenticated();
       allow get: if (isAuthenticated() && (belongsToSchool(schoolId) || isSuperAdmin()))
         || resource.data.settings.registrationQR.enabled == true;
-      allow list: if isSuperAdmin();
+      allow list: if isSuperAdmin() || resource.data.settings.registrationQR.enabled == true;
       allow update: if isAdminOfSchool(schoolId) || isSuperAdmin();
       allow delete: if isSuperAdmin();
 
@@ -121,7 +121,7 @@ service cloud.firestore {
         allow create: if isTeacherOfSchool(schoolId) && canCreateStudent(schoolId);
         allow update: if isTeacherOfSchool(schoolId)
           || (isParent() && resource.data.parentId == uid()
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['documents', 'medicalInfo', 'updatedAt']));
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['documents', 'medicalInfo', 'updatedAt', 'status', 'isActive', 'signatureMetadata', 'sha256Hash']));
         allow delete: if isAdminOfSchool(schoolId);
       }
 
@@ -151,21 +151,24 @@ service cloud.firestore {
       // ─── Payments ──────────────────────────────────────────────────────
       match /payments/{paymentId} {
         allow read: if isAdminOfSchool(schoolId)
-          || (isParent() && get(/databases/$(database)/documents/schools/$(schoolId)/students/$(resource.data.studentId)).data.parentId == uid());
-        allow create, update: if isAdminOfSchool(schoolId);
+          || (isParent() && belongsToSchool(schoolId) && resource.data.parentId == uid());
+        allow create, update: if isAdminOfSchool(schoolId)
+          || (isParent() && belongsToSchool(schoolId) && resource.data.parentId == uid());
         allow delete: if isAdminOfSchool(schoolId);
       }
 
       // ─── Events ────────────────────────────────────────────────────────
       match /events/{eventId} {
-        allow read: if isTeacherOfSchool(schoolId) || isParent();
+        allow read: if isTeacherOfSchool(schoolId)
+          || (isParent() && belongsToSchool(schoolId));
         allow create, update: if isAdminOfSchool(schoolId);
         allow delete: if isAdminOfSchool(schoolId);
       }
 
       // ─── Costume Orders ────────────────────────────────────────────────
       match /costumeOrders/{orderId} {
-        allow read: if isTeacherOfSchool(schoolId);
+        allow read: if isTeacherOfSchool(schoolId)
+          || (isParent() && belongsToSchool(schoolId));
         allow create, update: if isAdminOfSchool(schoolId);
         allow delete: if isAdminOfSchool(schoolId);
       }
@@ -184,6 +187,18 @@ service cloud.firestore {
       // ─── Registration Requests ─────────────────────────────────────────
       match /registrationRequests/{requestId} {
         allow create: if request.resource.data.status == 'pending';
+        allow read, write: if isAdminOfSchool(schoolId);
+      }
+
+      // ─── Fiscal Codes Index (Anti-Doppione) ──────────────────────────────
+      match /fiscalCodesIndex/{cf} {
+        allow read: if true;
+        allow create: if request.resource.data.status in ['pending', 'registered'];
+        allow update, delete: if isAdminOfSchool(schoolId);
+      }
+
+      // ─── Counters (Atomic Receipt Sequences) ───────────────────────────
+      match /counters/{counterId} {
         allow read, write: if isAdminOfSchool(schoolId);
       }
     }

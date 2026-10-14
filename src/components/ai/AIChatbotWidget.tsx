@@ -52,11 +52,11 @@ export function AIChatbotWidget() {
     .reduce((sum, p) => sum + p.amount, 0);
 
   // Construct the Claude system prompt with real school metrics
-  const systemPrompt = `Sei Danzila, l'assistente virtuale ufficiale della scuola di danza "${activeSchool?.name || 'DanceFlow'}".
+  const systemPrompt = `Sei Danzila, l'assistente virtuale ufficiale della scuola di danza "${activeSchool?.name || 'Tropical Style'}".
 Il tuo compito è aiutare gli amministratori e gli insegnanti a gestire la scuola rispondendo alle loro domande con tono amichevole, professionale ed entusiasta della danza.
 
 Dati reali correnti della scuola:
-- Nome della scuola di danza: ${activeSchool?.name || 'DanceFlow'}
+- Nome della scuola di danza: ${activeSchool?.name || 'Tropical Style'}
 - Numero totale allievi attivi: ${activeStudentsCount} allievi attivi (su un totale di ${students.filter(s => !s.isDeleted).length} registrati)
 - Corsi attivi offerti: ${activeCoursesNames || 'Nessun corso attivo configurato'}
 - Numero corsi totali: ${activeCourses.length}
@@ -69,7 +69,7 @@ Rispondi sempre in italiano. Sii estremamente preciso usando i dati reali fornit
     const q = query.toLowerCase();
 
     if (q.includes('alliev') || q.includes('student') || q.includes('iscritt')) {
-      return `Attualmente la scuola "${activeSchool?.name || 'DanceFlow'}" conta ${activeStudentsCount} allievi attivi (su un totale di ${students.filter(s => !s.isDeleted).length} allievi inseriti).`;
+      return `Attualmente la scuola "${activeSchool?.name || 'Tropical Style'}" conta ${activeStudentsCount} allievi attivi (su un totale di ${students.filter(s => !s.isDeleted).length} allievi inseriti).`;
     }
 
     if (q.includes('cors') || q.includes('schedul') || q.includes('lezion')) {

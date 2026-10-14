@@ -1,11 +1,13 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
-import { createUserWithEmailAndPassword } from 'firebase/auth';
-import { auth, db } from '@/lib/firebase';
+import { collection, query, where, getDocs, getDoc, doc, setDoc } from 'firebase/firestore';
+import { initializeApp, getApps } from 'firebase/app';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, getAuth, signOut } from 'firebase/auth';
+import { db, auth, firebaseConfig } from '@/lib/firebase';
 import { Card, CardTitle, Input, Select, Button, EmptyState } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { COLLECTIONS, nowTimestamp } from '@/lib/converters';
+import { useAuthStore } from '@/stores/authStore';
 import type { School, Course } from '@/types';
 import toast from 'react-hot-toast';
 import { SignaturePad, SignaturePadRef } from '@/components/registration/SignaturePad';
@@ -13,13 +15,28 @@ import { generateRegistrationPdf } from '@/services/pdf/RegistrationPdfBuilder';
 import { uploadRegistrationForm } from '@/services/api/storageService';
 import { submitRegistrationRequest } from '@/services/api/registrationService';
 import { 
-  User, Shield, MapPin, Clipboard, ChevronRight, ChevronLeft, CheckCircle 
+  User, Shield, MapPin, ChevronRight, ChevronLeft, CheckCircle 
 } from 'lucide-react';
+
+function calculateAge(birthDateString: string): number | null {
+  if (!birthDateString) return null;
+  const birth = new Date(birthDateString);
+  if (isNaN(birth.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birth.getFullYear();
+  const m = today.getMonth() - birth.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birth.getDate())) {
+    age--;
+  }
+  return age;
+}
 
 export default function RegistrationPage() {
   const { token } = useParams<{ token: string }>();
   const navigate = useNavigate();
   const sigPadRef = useRef<SignaturePadRef>(null);
+
+  const currentUser = useAuthStore((s) => s.user);
 
   const [loading, setLoading] = useState(true);
   const [school, setSchool] = useState<School | null>(null);
@@ -29,14 +46,7 @@ export default function RegistrationPage() {
   const [requestSent, setRequestSent] = useState(false);
 
   // --- WIZARD FORM STATES ---
-  // Step 1: Parent Account (Registrant)
-  const [parentName, setParentName] = useState('');
-  const [parentEmail, setParentEmail] = useState('');
-  const [parentPassword, setParentPassword] = useState('');
-  const [parentPhone, setParentPhone] = useState('');
-  const [parentRelation, setParentRelation] = useState('madre'); // madre, padre, tutore, allievo (se maggiorenne)
-
-  // Step 2: Student Info
+  // Student Info (always entered first)
   const [studentFirstName, setStudentFirstName] = useState('');
   const [studentLastName, setStudentLastName] = useState('');
   const [studentBirthDate, setStudentBirthDate] = useState('');
@@ -45,14 +55,44 @@ export default function RegistrationPage() {
   const [studentPhone, setStudentPhone] = useState('');
   const [studentEmail, setStudentEmail] = useState('');
 
-  // Step 3: Address & Course
+  // Parent/Referent Info (auto-expanded only if student is minor)
+  const isExistingParentUser = currentUser && currentUser.role === 'parent';
+  const [parentName, setParentName] = useState(isExistingParentUser ? currentUser?.displayName || '' : '');
+  const [parentEmail, setParentEmail] = useState(isExistingParentUser ? currentUser?.email || '' : '');
+  const [parentPassword, setParentPassword] = useState('');
+  const [parentPhone, setParentPhone] = useState('');
+  const [parentRelation, setParentRelation] = useState('madre');
+
+  // Address & Courses
   const [addressStreet, setAddressStreet] = useState('');
   const [addressCity, setAddressCity] = useState('');
   const [addressProvince, setAddressProvince] = useState('');
   const [addressPostalCode, setAddressPostalCode] = useState('');
-  const [courseInterest, setCourseInterest] = useState('');
+  const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
   const [privacyCommon, setPrivacyCommon] = useState(false);
   const [privacySanitary, setPrivacySanitary] = useState(false);
+
+  // Automatic age calculation & minor detection directly from date of birth
+  const calculatedAge = calculateAge(studentBirthDate);
+  const isMinor = calculatedAge !== null && calculatedAge < 18;
+
+  // Prefill if currentUser arrives after mount
+  useEffect(() => {
+    if (currentUser) {
+      if (currentUser.displayName && !parentName) setParentName(currentUser.displayName);
+      if (currentUser.email && !parentEmail) setParentEmail(currentUser.email);
+      if (currentUser.email && !studentEmail) setStudentEmail(currentUser.email);
+      if (currentUser.displayName && !studentFirstName && !studentLastName) {
+        const parts = currentUser.displayName.trim().split(' ');
+        if (parts.length > 1) {
+          setStudentFirstName(parts[0]);
+          setStudentLastName(parts.slice(1).join(' '));
+        } else {
+          setStudentFirstName(currentUser.displayName);
+        }
+      }
+    }
+  }, [currentUser]);
 
   // 1. Fetch School & Course Details
   useEffect(() => {
@@ -84,7 +124,7 @@ export default function RegistrationPage() {
           collection(db, COLLECTIONS.courses(schoolData.id))
         );
         const fetchedCourses = coursesSnap.docs
-          .map((d) => d.data() as Course)
+          .map((d) => ({ id: d.id, ...d.data() } as Course))
           .filter((c) => c.isDeleted !== true && c.isActive !== false);
         setCourses(fetchedCourses);
       } catch (err) {
@@ -97,40 +137,84 @@ export default function RegistrationPage() {
     void loadSchoolData();
   }, [token]);
 
+  const [checkingCF, setCheckingCF] = useState(false);
 
-
-  const handleNext = () => {
+  const handleNext = async () => {
     if (step === 1) {
-      if (!parentName.trim() || !parentEmail.trim() || !parentPassword.trim() || !parentPhone.trim()) {
-        toast.error('Compila tutti i campi obbligatori del referente.');
+      if (!studentFirstName.trim() || !studentLastName.trim() || !studentBirthDate.trim() || !studentFiscalCode.trim()) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+        toast.error("Compila tutti i campi anagrafici dell'allievo.");
         return;
       }
-      if (parentPassword.length < 6) {
-        toast.error('La password deve essere di almeno 6 caratteri.');
+      const cleanCF = studentFiscalCode.trim().toUpperCase();
+      if (cleanCF.length !== 16) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+        toast.error('Il Codice Fiscale deve contenere esattamente 16 caratteri.');
         return;
+      }
+
+      // Controllo anti-doppione Codice Fiscale
+      if (school) {
+        try {
+          setCheckingCF(true);
+          const cfDocRef = doc(db, 'schools', school.id, 'fiscalCodesIndex', cleanCF);
+          const cfSnap = await getDoc(cfDocRef);
+          if (cfSnap.exists()) {
+            window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+            toast.error(
+              'Questo Codice Fiscale risulta già registrato o in attesa di approvazione presso la nostra scuola. Per variazioni contatta la segreteria.',
+              { duration: 7000 }
+            );
+            return;
+          }
+        } catch (cfErr) {
+          console.warn('[RegistrationPage] Error checking duplicate CF:', cfErr);
+        } finally {
+          setCheckingCF(false);
+        }
+      }
+
+      if (isMinor) {
+        if (!parentName.trim() || !parentEmail.trim() || !parentPhone.trim()) {
+          window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+          toast.error('Compila tutti i campi obbligatori del genitore o tutore legale.');
+          return;
+        }
+        if (!currentUser && (!parentPassword.trim() || parentPassword.length < 6)) {
+          toast.error('La password del portale genitore deve contenere almeno 6 caratteri.');
+          return;
+        }
+      } else {
+        // Adult student
+        if (!studentPhone.trim() || !studentEmail.trim()) {
+          toast.error("Inserisci il tuo cellulare e la tua email per l'account allievo.");
+          return;
+        }
+        if (!currentUser && (!parentPassword.trim() || parentPassword.length < 6)) {
+          toast.error('La password per il tuo account allievo deve contenere almeno 6 caratteri.');
+          return;
+        }
+        // Auto-assign parent fields to ensure system & PDF compatibility
+        setParentName(`${studentFirstName.trim()} ${studentLastName.trim()}`);
+        setParentEmail(studentEmail.trim());
+        setParentPhone(studentPhone.trim());
+        setParentRelation('allievo');
       }
     }
     if (step === 2) {
-      if (!studentFirstName.trim() || !studentLastName.trim() || !studentBirthDate.trim() || !studentFiscalCode.trim()) {
-        toast.error("Compila tutti i campi obbligatori dell'allievo.");
-        return;
-      }
-      if (studentFiscalCode.length !== 16) {
-        toast.error('Il Codice Fiscale deve contenere 16 caratteri.');
+      if (!addressStreet.trim() || !addressCity.trim() || !addressProvince.trim() || !addressPostalCode.trim() || selectedCourseIds.length === 0) {
+        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+        toast.error('Compila tutti i campi di residenza (Via, Città, Prov, CAP) e seleziona almeno un corso di interesse.');
         return;
       }
     }
-    if (step === 3) {
-      if (!addressStreet.trim() || !addressCity.trim() || !addressProvince.trim() || !addressPostalCode.trim() || !courseInterest) {
-        toast.error('Compila tutti i campi di residenza e seleziona un corso.');
-        return;
-      }
-    }
-    setStep(step + 1);
+    setStep((prev) => prev + 1);
+    window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   };
 
   const handleBack = () => {
-    setStep(step - 1);
+    setStep((prev) => Math.max(1, prev - 1));
+    window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
   };
 
   // Submit flow
@@ -150,6 +234,12 @@ export default function RegistrationPage() {
 
     setSubmitting(true);
     try {
+      const isAdult = !isMinor;
+      const effectiveParentName = isAdult ? `${studentFirstName.trim()} ${studentLastName.trim()}` : parentName.trim();
+      const effectiveParentEmail = isAdult ? studentEmail.trim().toLowerCase() : parentEmail.trim().toLowerCase();
+      const effectiveParentPhone = isAdult ? studentPhone.trim() : parentPhone.trim();
+      const effectiveParentRelation = isAdult ? 'allievo' : parentRelation;
+
       // 1. Fetch Client IP from ipify
       let ipAddress = '127.0.0.1';
       try {
@@ -178,22 +268,82 @@ export default function RegistrationPage() {
         sessionId,
       };
 
-      // 4. Create Parent account in Firebase Auth
-      const userCred = await createUserWithEmailAndPassword(auth, parentEmail, parentPassword);
-      const parentUid = userCred.user.uid;
+      // 4. Resolve Account in Firebase Auth
+      let parentUid: string;
 
-      // 5. Save parent record to Firestore 'users'
+      if (currentUser && currentUser.role === 'parent') {
+        parentUid = currentUser.uid;
+      } else if (currentUser && currentUser.role !== 'parent') {
+        // Admin or staff testing the form while logged in:
+        // Use secondary auth app instance to avoid hijacking or logging out active admin session.
+        // Because the admin is logged in on the default app, isAdminOfSchool in Firestore allows creating users/{parentUid}.
+        const registrationApp = getApps().find(a => a.name === 'RegistrationAuth') || initializeApp(firebaseConfig, 'RegistrationAuth');
+        const regAuth = getAuth(registrationApp);
+
+        try {
+          const userCred = await createUserWithEmailAndPassword(regAuth, effectiveParentEmail, parentPassword);
+          parentUid = userCred.user.uid;
+          await signOut(regAuth);
+        } catch (authErr: any) {
+          if (authErr.code === 'auth/email-already-in-use') {
+            try {
+              const cred = await signInWithEmailAndPassword(regAuth, effectiveParentEmail, parentPassword);
+              parentUid = cred.user.uid;
+              await signOut(regAuth);
+            } catch (signInErr: any) {
+              console.error('[RegistrationPage] Existing user sign-in failed:', signInErr);
+              throw new Error(
+                'Questo indirizzo email risulta già registrato. Inserisci la password corretta del tuo account per completare la registrazione.'
+              );
+            }
+          } else {
+            throw authErr;
+          }
+        }
+      } else {
+        // Normal visitor / anonymous self-registration:
+        // Create and authenticate directly on default auth instance so request.auth.uid == parentUid in Firestore rules
+        try {
+          const userCred = await createUserWithEmailAndPassword(auth, effectiveParentEmail, parentPassword);
+          parentUid = userCred.user.uid;
+        } catch (authErr: any) {
+          if (authErr.code === 'auth/email-already-in-use') {
+            try {
+              const cred = await signInWithEmailAndPassword(auth, effectiveParentEmail, parentPassword);
+              parentUid = cred.user.uid;
+            } catch (signInErr: any) {
+              console.error('[RegistrationPage] Existing user sign-in failed:', signInErr);
+              throw new Error(
+                'Questo indirizzo email risulta già registrato. Inserisci la password corretta del tuo account per completare la registrazione.'
+              );
+            }
+          } else {
+            throw authErr;
+          }
+        }
+      }
+
+      // 5. Save/update user record in Firestore 'users'
       const userRef = doc(db, 'users', parentUid);
-      await setDoc(userRef, {
-        uid: parentUid,
-        email: parentEmail,
-        displayName: parentName,
-        role: 'parent',
-        schoolId: school.id,
-        isActive: false, // Pending admin approval of the registration request
-        createdAt: nowTimestamp(),
-        updatedAt: nowTimestamp(),
-      });
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists()) {
+        await setDoc(userRef, {
+          uid: parentUid,
+          email: effectiveParentEmail,
+          displayName: effectiveParentName,
+          role: 'parent',
+          schoolId: school.id,
+          isActive: false, // Pending admin approval of the registration request
+          createdAt: nowTimestamp(),
+          updatedAt: nowTimestamp(),
+        });
+      } else {
+        // If user document already exists, don't overwrite role, schoolId or deactivate an active parent account
+        await setDoc(userRef, {
+          displayName: effectiveParentName,
+          updatedAt: nowTimestamp(),
+        }, { merge: true });
+      }
 
       // 6. Generate the signed registration PDF locally
       const studentData = {
@@ -211,10 +361,10 @@ export default function RegistrationPage() {
         contact: {
           studentPhone: studentPhone.trim() || undefined,
           studentEmail: studentEmail.trim() || undefined,
-          parentName: parentName.trim(),
-          parentRelation: parentRelation,
-          parentPhone: parentPhone.trim(),
-          parentEmail: parentEmail.trim(),
+          parentName: isAdult ? undefined : parentName.trim(),
+          parentRelation: effectiveParentRelation,
+          parentPhone: effectiveParentPhone,
+          parentEmail: effectiveParentEmail,
         }
       };
 
@@ -230,25 +380,31 @@ export default function RegistrationPage() {
       const mockStudentId = Math.random().toString(36).substring(2, 15);
       const pdfUrl = await uploadRegistrationForm(mockStudentId, pdfBlob);
 
+      // Course interest names from selected course IDs
+      const selectedCoursesList = courses.filter((c) => selectedCourseIds.includes(c.id));
+      const courseInterestNames = selectedCoursesList.map((c) => c.name).join(', ');
+
       // 8. Create the registration request in Firestore using the service
       await submitRegistrationRequest(school.id, {
-        parentName,
-        parentEmail,
-        parentPhone,
-        parentRelation,
+        parentName: effectiveParentName,
+        parentEmail: effectiveParentEmail,
+        parentPhone: effectiveParentPhone,
+        parentRelation: effectiveParentRelation,
         parentUid,
-        studentFirstName,
-        studentLastName,
+        studentFirstName: studentFirstName.trim(),
+        studentLastName: studentLastName.trim(),
         studentBirthDate,
         studentGender,
-        studentFiscalCode,
-        studentPhone: studentPhone || undefined,
-        studentEmail: studentEmail || undefined,
+        studentFiscalCode: studentFiscalCode.trim().toUpperCase(),
+        studentPhone: studentPhone.trim() || undefined,
+        studentEmail: studentEmail.trim() || undefined,
         addressStreet,
         addressCity,
         addressProvince,
         addressPostalCode,
-        courseInterest,
+        courseInterest: courseInterestNames,
+        courseIds: selectedCourseIds,
+        signatureBase64,
         pdfUrl,
         sha256Hash,
         signatureMetadata: {
@@ -262,6 +418,19 @@ export default function RegistrationPage() {
           }
         }
       });
+
+      // Indicizza il Codice Fiscale per bloccare doppioni immediati
+      try {
+        const cfDocRef = doc(db, 'schools', school.id, 'fiscalCodesIndex', studentFiscalCode.trim().toUpperCase());
+        await setDoc(cfDocRef, {
+          fiscalCode: studentFiscalCode.trim().toUpperCase(),
+          status: 'pending',
+          studentName: `${studentFirstName.trim()} ${studentLastName.trim()}`,
+          createdAt: nowTimestamp(),
+        });
+      } catch (cfIdxErr) {
+        console.warn('[RegistrationPage] Error indexing CF:', cfIdxErr);
+      }
 
       setRequestSent(true);
       toast.success('Registrazione inviata con successo!');
@@ -303,6 +472,12 @@ export default function RegistrationPage() {
   const privacyUrl = school?.customPrivacyUrl || `/privacy?schoolId=${school?.id || ''}`;
   const termsUrl = school?.customTermsUrl || `/terms?schoolId=${school?.id || ''}`;
 
+  const stepsList = [
+    { s: 1, label: 'Dati Anagrafici', icon: <User size={14} /> },
+    { s: 2, label: 'Indirizzo & Corsi', icon: <MapPin size={14} /> },
+    { s: 3, label: 'Firma Digitale', icon: <Shield size={14} /> },
+  ];
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen flex items-center justify-center p-6 bg-surface-950 overflow-y-auto">
@@ -321,15 +496,10 @@ export default function RegistrationPage() {
             <p className="text-sm text-white/50">Modulo di Registrazione Online</p>
           </div>
 
-          {/* Progress bar */}
+          {/* Progress bar (always 3 clean steps) */}
           {!requestSent && (
             <div className="flex items-center justify-between bg-black/20 p-4 rounded-2xl border border-white/5">
-              {[
-                { s: 1, label: 'Genitore', icon: <User size={14} /> },
-                { s: 2, label: 'Allievo', icon: <Clipboard size={14} /> },
-                { s: 3, label: 'Indirizzo', icon: <MapPin size={14} /> },
-                { s: 4, label: 'Firma', icon: <Shield size={14} /> },
-              ].map((item) => (
+              {stepsList.map((item) => (
                 <div key={item.s} className="flex items-center gap-2">
                   <div className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold transition-all ${
                     step === item.s 
@@ -349,103 +519,78 @@ export default function RegistrationPage() {
           )}
 
           {requestSent ? (
-            <Card className="text-center p-8 border border-teal-500/20 bg-teal-500/5 page-enter">
-              <div className="w-16 h-16 rounded-full bg-teal-500/20 text-teal-400 flex items-center justify-center mx-auto mb-4">
+            <Card className="text-center p-8 border border-teal-500/20 bg-teal-500/5 page-enter space-y-4">
+              <div className="w-16 h-16 rounded-full bg-teal-500/20 text-teal-400 flex items-center justify-center mx-auto mb-2">
                 <CheckCircle size={36} />
               </div>
-              <h2 className="text-xl font-bold text-white mb-2">Iscrizione Ricevuta!</h2>
-              <p className="text-sm text-white/60 mb-6 leading-relaxed">
-                Il modulo firmato e i dati dell'allievo sono stati inviati alla segreteria della scuola.
-                La segreteria verificherà la richiesta e ti invierà una mail di conferma ad iscrizione approvata.
+              <h2 className="text-xl font-bold text-white">Iscrizione Ricevuta! 🎉</h2>
+              <p className="text-sm text-white/60 leading-relaxed max-w-md mx-auto">
+                Il modulo firmato è stato inviato alla segreteria di Tropical Style Caribbean School.
+                Riceverai conferma all'approvazione.
               </p>
-              <Button onClick={() => navigate('/login')} className="w-full">
-                Vai all'Accesso
-              </Button>
+
+              {currentUser?.role === 'parent' ? (
+                <div className="pt-2 flex flex-col gap-3 max-w-sm mx-auto">
+                  <p className="text-xs text-white/40">
+                    Vuoi visualizzare il tuo profilo o iscrivere un altro allievo? Trovi tutto nel Portale.
+                  </p>
+                  <Button onClick={() => navigate('/parent')} className="w-full">
+                    Vai al Portale Personale
+                  </Button>
+                </div>
+              ) : currentUser ? (
+                <div className="pt-2 flex flex-col gap-3 max-w-sm mx-auto">
+                  <p className="text-xs text-white/40">
+                    Iscrizione completata con successo. Torna al pannello di gestione della scuola.
+                  </p>
+                  <Button onClick={() => navigate('/settings')} className="w-full">
+                    Torna alle Impostazioni
+                  </Button>
+                </div>
+              ) : (
+                <div className="pt-2 flex flex-col gap-3 max-w-sm mx-auto">
+                  <p className="text-xs text-white/40">
+                    Accedi con l'email e la password appena scelte per consultare pagamenti, orari e comunicazioni.
+                  </p>
+                  <Button onClick={() => navigate('/login')} className="w-full">
+                    Vai all'Accesso
+                  </Button>
+                </div>
+              )}
             </Card>
           ) : (
             <Card className="p-6 border border-white/5">
-              <form onSubmit={handleSubmit} className="space-y-4">
+              <form onSubmit={handleSubmit} className="space-y-5">
 
-                {/* STEP 1: REFERENTE ACCOUNT */}
+                {/* ========================================================== */}
+                {/* STEP 1: DATI ANAGRAFICI ALLIEVO (+ GENITORE SE MINORENNE) */}
+                {/* ========================================================== */}
                 {step === 1 && (
                   <div className="space-y-4 page-enter">
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-brand-300 border-b border-white/5 pb-1 flex items-center gap-2">
-                      <User size={15} /> 1. Dati Genitore o Referente
+                      <User size={15} /> 1. Dati Anagrafici Allievo
                     </CardTitle>
 
-                    <Input
-                      label="Nome e Cognome Genitore/Referente *"
-                      placeholder="Es. Maria Rossi"
-                      value={parentName}
-                      onChange={(e) => setParentName(e.target.value)}
-                      required
-                    />
+                    {currentUser && (
+                      <div className="p-3 bg-brand-500/10 border border-brand-500/20 rounded-xl flex items-center gap-3">
+                        <span className="text-lg">👋</span>
+                        <div className="text-xs">
+                          <p className="font-semibold text-white">Accesso rilevato: {currentUser.displayName}</p>
+                          <p className="text-white/60">I tuoi dati sono stati precompilati per questa iscrizione.</p>
+                        </div>
+                      </div>
+                    )}
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       <Input
-                        type="email"
-                        label="Email Referente (Username) *"
-                        placeholder="genitore@email.com"
-                        value={parentEmail}
-                        onChange={(e) => setParentEmail(e.target.value)}
-                        required
-                      />
-                      <Input
-                        type="password"
-                        label="Scegli Password (min. 6 car.) *"
-                        placeholder="••••••••"
-                        value={parentPassword}
-                        onChange={(e) => setParentPassword(e.target.value)}
-                        required
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <Input
-                        label="Telefono Referente *"
-                        placeholder="Es. 347 1234567"
-                        value={parentPhone}
-                        onChange={(e) => setParentPhone(e.target.value)}
-                        required
-                      />
-                      <Select
-                        label="Relazione con l'Allievo *"
-                        value={parentRelation}
-                        onChange={(e) => setParentRelation(e.target.value)}
-                        options={[
-                          { value: 'madre', label: 'Madre' },
-                          { value: 'padre', label: 'Padre' },
-                          { value: 'tutore', label: 'Tutore Legale' },
-                          { value: 'allievo', label: 'Se stesso (Allievo Maggiorenne)' },
-                        ]}
-                      />
-                    </div>
-
-                    <div className="flex justify-end pt-4 border-t border-white/5">
-                      <Button type="button" onClick={handleNext} iconRight={<ChevronRight size={16} />}>
-                        Avanti
-                      </Button>
-                    </div>
-                  </div>
-                )}
-
-                {/* STEP 2: DATI ALLIEVO */}
-                {step === 2 && (
-                  <div className="space-y-4 page-enter">
-                    <CardTitle className="text-sm font-semibold uppercase tracking-wider text-brand-300 border-b border-white/5 pb-1 flex items-center gap-2">
-                      <Clipboard size={15} /> 2. Anagrafica dell'Allievo
-                    </CardTitle>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <Input
-                        label="Nome Figlio/Allievo *"
-                        placeholder="Es. Sofia"
+                        label="Nome Allievo *"
+                        placeholder="Es. Mario"
                         value={studentFirstName}
                         onChange={(e) => setStudentFirstName(e.target.value)}
                         required
                       />
                       <Input
-                        label="Cognome Figlio/Allievo *"
+                        label="Cognome Allievo *"
                         placeholder="Es. Rossi"
                         value={studentLastName}
                         onChange={(e) => setStudentLastName(e.target.value)}
@@ -464,7 +609,7 @@ export default function RegistrationPage() {
                         />
                       </div>
                       <Select
-                        label="Sesso Allievo *"
+                        label="Sesso *"
                         value={studentGender}
                         onChange={(e) => setStudentGender(e.target.value)}
                         options={[
@@ -475,6 +620,26 @@ export default function RegistrationPage() {
                       />
                     </div>
 
+                    {/* Automatic age status feedback */}
+                    {calculatedAge !== null && (
+                      <div className="pt-0.5">
+                        {!isMinor ? (
+                          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold">
+                            <span>✓</span> Data verificata: {calculatedAge} anni (Maggiorenne)
+                          </div>
+                        ) : (
+                          <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-xl space-y-1">
+                            <div className="flex items-center gap-2 text-amber-300 font-semibold text-xs">
+                              <span>🧒</span> Allievo Minorenne rilevato: {calculatedAge} anni
+                            </div>
+                            <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                              In base alla data di nascita, l'iscrizione e la firma devono essere convalidate da un genitore o tutore legale. Compila i dati del referente qui sotto.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <Input
                       label="Codice Fiscale Allievo *"
                       placeholder="Codice Fiscale di 16 caratteri"
@@ -484,42 +649,156 @@ export default function RegistrationPage() {
                       required
                     />
 
-                    <p className="text-xs text-white/40 italic">
-                      Se l'allievo è minorenne, inserisci i contatti del genitore nei recapiti sottostanti se non ne possiede di propri.
-                    </p>
+                    {/* SCENARIO 1: ALLIEVO MAGGIORENNE (nessun dato genitore richiesto) */}
+                    {!isMinor && (
+                      <div className="space-y-4 pt-2 border-t border-white/5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Input
+                            label="Cellulare Allievo *"
+                            placeholder="Es. 347 1234567"
+                            value={studentPhone}
+                            onChange={(e) => setStudentPhone(e.target.value)}
+                            required
+                          />
+                          <Input
+                            type="email"
+                            label="Email Allievo (Username Portale) *"
+                            placeholder="mario.rossi@email.com"
+                            value={studentEmail}
+                            onChange={(e) => setStudentEmail(e.target.value)}
+                            required
+                            autoComplete="username"
+                            disabled={!!currentUser}
+                          />
+                        </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <Input
-                        label="Telefono Allievo (Opzionale)"
-                        placeholder="Es. 347 1234567"
-                        value={studentPhone}
-                        onChange={(e) => setStudentPhone(e.target.value)}
-                      />
-                      <Input
-                        type="email"
-                        label="Email Allievo (Opzionale)"
-                        placeholder="allievo@email.com"
-                        value={studentEmail}
-                        onChange={(e) => setStudentEmail(e.target.value)}
-                      />
-                    </div>
+                        {!currentUser ? (
+                          <div>
+                            <Input
+                              type="password"
+                              label="Crea Password Portale *"
+                              placeholder="••••••••"
+                              value={parentPassword}
+                              onChange={(e) => setParentPassword(e.target.value)}
+                              required
+                              autoComplete="new-password"
+                            />
+                            <p className="text-[10px] text-white/40 mt-1">
+                              Con questa password potrai accedere all'area riservata per consultare orari, pagamenti e ricevute. Minimo 6 caratteri.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="flex items-center text-xs text-brand-300 bg-black/20 p-3 rounded-xl border border-white/5">
+                            ✓ Autenticato con account esistente ({currentUser.email}).
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-                    <div className="flex justify-between pt-4 border-t border-white/5">
-                      <Button type="button" variant="secondary" onClick={handleBack} icon={<ChevronLeft size={16} />}>
-                        Indietro
-                      </Button>
-                      <Button type="button" onClick={handleNext} iconRight={<ChevronRight size={16} />}>
-                        Avanti
+                    {/* SCENARIO 2: ALLIEVO MINORENNE (Espansione automatica Dati Genitore) */}
+                    {isMinor && (
+                      <div className="space-y-4 pt-3 border-t border-amber-500/20">
+                        <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
+                          <User size={14} /> Dati Genitore o Tutore Legale
+                        </div>
+
+                        <Input
+                          label="Nome e Cognome Genitore/Tutore *"
+                          placeholder="Es. Maria Rossi"
+                          value={parentName}
+                          onChange={(e) => setParentName(e.target.value)}
+                          required
+                        />
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Input
+                            label="Telefono Genitore *"
+                            placeholder="Es. 347 1234567"
+                            value={parentPhone}
+                            onChange={(e) => setParentPhone(e.target.value)}
+                            required
+                          />
+                          <Select
+                            label="Relazione con l'Allievo *"
+                            value={parentRelation}
+                            onChange={(e) => setParentRelation(e.target.value)}
+                            options={[
+                              { value: 'madre', label: 'Madre' },
+                              { value: 'padre', label: 'Padre' },
+                              { value: 'tutore', label: 'Tutore Legale' },
+                            ]}
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <Input
+                            type="email"
+                            label="Email Genitore (Username Portale) *"
+                            placeholder="genitore@email.com"
+                            value={parentEmail}
+                            onChange={(e) => setParentEmail(e.target.value)}
+                            required
+                            autoComplete="username"
+                            disabled={!!currentUser}
+                          />
+                          {!currentUser ? (
+                            <div>
+                              <Input
+                                type="password"
+                                label="Password Portale Genitori *"
+                                placeholder="••••••••"
+                                value={parentPassword}
+                                onChange={(e) => setParentPassword(e.target.value)}
+                                required
+                                autoComplete="new-password"
+                              />
+                              <p className="text-[10px] text-white/40 mt-1">
+                                Se hai già iscritto un altro allievo con questa email, inserisci la stessa password.
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="flex items-center text-xs text-brand-300 bg-black/20 p-3 rounded-xl border border-white/5">
+                              ✓ Autenticato con account esistente.
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="pt-2 border-t border-white/5">
+                          <p className="text-[11px] text-white/40 mb-2">Recapiti personali dell'allievo (facoltativi se minorenne):</p>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <Input
+                              label="Telefono Allievo (Opzionale)"
+                              placeholder="Es. 347 1234567"
+                              value={studentPhone}
+                              onChange={(e) => setStudentPhone(e.target.value)}
+                            />
+                            <Input
+                              type="email"
+                              label="Email Allievo (Opzionale)"
+                              placeholder="allievo@email.com"
+                              value={studentEmail}
+                              onChange={(e) => setStudentEmail(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end pt-4 border-t border-white/5">
+                      <Button type="button" onClick={handleNext} loading={checkingCF} iconRight={<ChevronRight size={16} />}>
+                        Avanti (Residenza & Corsi)
                       </Button>
                     </div>
                   </div>
                 )}
 
-                {/* STEP 3: RESIDENZA E CORSO */}
-                {step === 3 && (
+                {/* ========================================================== */}
+                {/* STEP 2: RESIDENZA & SCELTA CORSI                           */}
+                {/* ========================================================== */}
+                {step === 2 && (
                   <div className="space-y-4 page-enter">
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-brand-300 border-b border-white/5 pb-1 flex items-center gap-2">
-                      <MapPin size={15} /> 3. Indirizzo di Residenza & Corso
+                      <MapPin size={15} /> 2. Indirizzo di Residenza & Corsi
                     </CardTitle>
 
                     <Input
@@ -534,7 +813,7 @@ export default function RegistrationPage() {
                       <div className="col-span-2 md:col-span-2">
                         <Input
                           label="Città *"
-                          placeholder="Es. Milano"
+                          placeholder="Es. Palermo"
                           value={addressCity}
                           onChange={(e) => setAddressCity(e.target.value)}
                           required
@@ -543,7 +822,7 @@ export default function RegistrationPage() {
                       <div className="col-span-1 md:col-span-1">
                         <Input
                           label="Prov. *"
-                          placeholder="MI"
+                          placeholder="PA"
                           maxLength={2}
                           value={addressProvince}
                           onChange={(e) => setAddressProvince(e.target.value.toUpperCase())}
@@ -553,7 +832,7 @@ export default function RegistrationPage() {
                       <div className="col-span-3 md:col-span-1">
                         <Input
                           label="CAP *"
-                          placeholder="20100"
+                          placeholder="90100"
                           maxLength={5}
                           value={addressPostalCode}
                           onChange={(e) => setAddressPostalCode(e.target.value)}
@@ -562,33 +841,76 @@ export default function RegistrationPage() {
                       </div>
                     </div>
 
-                    <Select
-                      label="Seleziona Corso di Interesse *"
-                      value={courseInterest}
-                      onChange={(e) => setCourseInterest(e.target.value)}
-                      required
-                      options={[
-                        { value: '', label: 'Seleziona il corso...' },
-                        ...courses.map((c) => ({ value: c.id, label: `${c.name} (${c.style} · €${c.fee.monthly}/mese)` }))
-                      ]}
-                    />
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-white/70 block">
+                        Seleziona Corso/i di Interesse *
+                      </label>
+                      <p className="text-[11px] text-white/40">
+                        Seleziona i corsi a cui {!isMinor ? 'desideri iscriverti' : "iscrivere l'allievo"}:
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-60 overflow-y-auto pr-1">
+                        {courses.map((c) => {
+                          const isSelected = selectedCourseIds.includes(c.id);
+                          return (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                if (isSelected) {
+                                  setSelectedCourseIds(selectedCourseIds.filter((id) => id !== c.id));
+                                } else {
+                                  setSelectedCourseIds([...selectedCourseIds, c.id]);
+                                }
+                              }}
+                              className={`text-left p-3 rounded-xl border transition-all flex items-start justify-between gap-2 cursor-pointer ${
+                                isSelected
+                                  ? 'bg-brand-500/20 border-brand-500/50 text-white shadow-md shadow-brand-500/10'
+                                  : 'bg-black/20 border-white/10 text-white/70 hover:border-white/20'
+                              }`}
+                            >
+                              <div>
+                                <p className="text-xs font-bold text-white">{c.name}</p>
+                                <p className="text-[10px] text-white/50">{c.style} · {c.fee?.monthly ? `€${c.fee.monthly}/mese` : 'Tariffa scuola'}</p>
+                              </div>
+                              <div className={`w-5 h-5 rounded-md flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5 ${
+                                isSelected ? 'bg-brand-500 text-white' : 'border border-white/20'
+                              }`}>
+                                {isSelected ? '✓' : ''}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {selectedCourseIds.length > 0 ? (
+                        <p className="text-xs text-brand-300 font-medium pt-1">
+                          ✓ {selectedCourseIds.length} {selectedCourseIds.length === 1 ? 'corso selezionato' : 'corsi selezionati'}:{' '}
+                          {courses.filter((c) => selectedCourseIds.includes(c.id)).map((c) => c.name).join(', ')}
+                        </p>
+                      ) : (
+                        <p className="text-xs text-amber-400/80 font-medium pt-1">
+                          ⚠️ Seleziona almeno un corso per proseguire
+                        </p>
+                      )}
+                    </div>
 
                     <div className="flex justify-between pt-4 border-t border-white/5">
                       <Button type="button" variant="secondary" onClick={handleBack} icon={<ChevronLeft size={16} />}>
                         Indietro
                       </Button>
                       <Button type="button" onClick={handleNext} iconRight={<ChevronRight size={16} />}>
-                        Avanti
+                        Avanti (Consensi & Firma)
                       </Button>
                     </div>
                   </div>
                 )}
 
-                {/* STEP 4: PRIVACY E SIGNATURE CANVAS */}
-                {step === 4 && (
+                {/* ========================================================== */}
+                {/* STEP 3: CONSENSI GDPR & FIRMA DIGITALE                    */}
+                {/* ========================================================== */}
+                {step === 3 && (
                   <div className="space-y-4 page-enter">
                     <CardTitle className="text-sm font-semibold uppercase tracking-wider text-brand-300 border-b border-white/5 pb-1 flex items-center gap-2">
-                      <Shield size={15} /> 4. Consensi GDPR & Firma Digitale
+                      <Shield size={15} /> 3. Consensi GDPR & Firma Digitale
                     </CardTitle>
 
                     {/* GDPR legal info preview box */}
@@ -644,7 +966,9 @@ export default function RegistrationPage() {
 
                     <div className="space-y-1">
                       <label className="text-xs font-semibold text-white/70 block">
-                        Firma Autografa del Referente ({parentName || 'Genitore'}) *
+                        Firma Autografa {isMinor 
+                          ? `del Genitore/Tutore (${parentName || 'Genitore'})` 
+                          : `dell'Allievo (${studentFirstName} ${studentLastName})`} *
                       </label>
                       <SignaturePad ref={sigPadRef} />
                     </div>
@@ -665,10 +989,11 @@ export default function RegistrationPage() {
           )}
 
           <p className="text-center text-xs text-white/20">
-            DanceFlow FES Security Node · © 2026 All rights reserved
+            Tropical Style Caribbean School · © 2026 All rights reserved
           </p>
         </div>
       </div>
     </ErrorBoundary>
   );
 }
+

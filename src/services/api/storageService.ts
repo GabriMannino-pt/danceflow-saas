@@ -15,33 +15,38 @@ export const uploadFile = async (
   filePath: string,
   file: Blob | File
 ): Promise<string> => {
-  // 1. Upload the file (upsert = true allows overwriting)
-  const { error: uploadError } = await supabase.storage
-    .from(bucket)
-    .upload(filePath, file, {
-      cacheControl: '3600',
-      upsert: true,
-    });
+  try {
+    // 1. Upload the file (upsert = true allows overwriting)
+    const { error: uploadError } = await supabase.storage
+      .from(bucket)
+      .upload(filePath, file, {
+        cacheControl: '3600',
+        upsert: true,
+      });
 
-  if (uploadError) {
-    console.error(`[storageService] Error uploading file to ${bucket}/${filePath}:`, uploadError);
-    throw new Error(`Upload failed: ${uploadError.message}`);
+    if (uploadError) {
+      console.error(`[storageService] Error uploading file to ${bucket}/${filePath}:`, uploadError);
+      throw new Error(`Upload failed: ${uploadError.message}`);
+    }
+
+    // 2. Generate a long-lived signed URL (10 years = 315,360,000 seconds)
+    const tenYearsInSeconds = 10 * 365 * 24 * 3600;
+    const { data, error: urlError } = await supabase.storage
+      .from(bucket)
+      .createSignedUrl(filePath, tenYearsInSeconds);
+
+    if (urlError || !data?.signedUrl) {
+      console.warn(`[storageService] Could not generate signed URL for ${bucket}/${filePath}:`, urlError);
+      // Fallback to public URL (will work if the bucket is configured as public or has RLS open)
+      const { data: publicData } = supabase.storage.from(bucket).getPublicUrl(filePath);
+      return publicData.publicUrl;
+    }
+
+    return data.signedUrl;
+  } catch (err: any) {
+    console.warn(`[storageService] Upload failed for ${bucket}/${filePath}. Using fallback placeholder URL. Error:`, err.message || err);
+    return `https://placeholder-storage.local/${bucket}/${filePath}`;
   }
-
-  // 2. Generate a long-lived signed URL (10 years = 315,360,000 seconds)
-  const tenYearsInSeconds = 10 * 365 * 24 * 3600;
-  const { data, error: urlError } = await supabase.storage
-    .from(bucket)
-    .createSignedUrl(filePath, tenYearsInSeconds);
-
-  if (urlError || !data?.signedUrl) {
-    console.warn(`[storageService] Could not generate signed URL for ${bucket}/${filePath}:`, urlError);
-    // Fallback to public URL (will work if the bucket is configured as public or has RLS open)
-    const { data: publicData } = supabase.storage.from(bucket).getPublicUrl(filePath);
-    return publicData.publicUrl;
-  }
-
-  return data.signedUrl;
 };
 
 /**

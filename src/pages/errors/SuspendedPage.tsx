@@ -50,19 +50,15 @@ export default function SuspendedPage() {
           </div>
 
           <p className="text-sm text-white/70 leading-relaxed">
-            Spettabile Cliente, l'accesso a questa piattaforma DanceFlow per la scuola{' '}
-            <strong className="text-white font-semibold">{activeSchool?.name || 'associata'}</strong> è stato temporaneamente sospeso per motivi amministrativi o mancato rinnovo del servizio.
+            Spettabile Utente, l'accesso alla piattaforma gestionale di{' '}
+            <strong className="text-white font-semibold">{activeSchool?.name || 'Tropical Style'}</strong> è stato temporaneamente sospeso per verifiche amministrative.
           </p>
 
           <div className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl text-left text-xs text-white/50 leading-relaxed">
             <p className="font-semibold text-white/70 mb-1 flex items-center gap-1.5">
               <Lock size={12} className="text-coral-400" /> Cosa puoi fare?
             </p>
-            Se sei l'amministratore scolastico, ti invitiamo a contattare il supporto clienti all'indirizzo{' '}
-            <a href="mailto:support@danceflow.it" className="text-brand-300 hover:underline">
-              support@danceflow.it
-            </a>{' '}
-            per verificare la tua posizione amministrativa e riattivare il servizio.
+            Se sei l'amministratore, contatta la segreteria o l'assistenza per riattivare immediatamente l'accesso.
           </div>
 
           <div className="pt-2 flex flex-col sm:flex-row gap-3">

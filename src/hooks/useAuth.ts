@@ -33,13 +33,12 @@ export function useAuthBootstrap() {
           const appUser = await fetchOrCreateUser(fbUser);
           setUser(appUser);
 
-          // Sync active school to schoolStore
-          if (appUser.schoolId) {
-            const schoolRef = doc(db, 'schools', appUser.schoolId).withConverter(schoolConverter);
-            const schoolSnap = await getDoc(schoolRef);
-            if (schoolSnap.exists()) {
-              useSchoolStore.getState().setActiveSchool(schoolSnap.data());
-            }
+          // Sync active school to schoolStore (Single-Tenant fallback to Tropical Style)
+          const targetSchoolId = appUser.schoolId || 'OFLsxTdw5F2aHEvlj1RU';
+          const schoolRef = doc(db, 'schools', targetSchoolId).withConverter(schoolConverter);
+          const schoolSnap = await getDoc(schoolRef);
+          if (schoolSnap.exists()) {
+            useSchoolStore.getState().setActiveSchool(schoolSnap.data());
           } else {
             useSchoolStore.getState().setActiveSchool(null);
           }
@@ -65,10 +64,22 @@ export function useAuthBootstrap() {
 // ─── Fetch or create AppUser doc ──────────────────────────────────────────────
 async function fetchOrCreateUser(fbUser: FirebaseUser): Promise<AppUser> {
   const ref = doc(db, COLLECTIONS.users, fbUser.uid).withConverter(userConverter);
-  const snap = await getDoc(ref);
+  let snap = await getDoc(ref);
 
   if (snap.exists()) {
     return snap.data();
+  }
+
+  // If password sign-in, wait a short moment and retry once, to avoid race conditions with registration
+  const isPassword = fbUser.providerData.some(p => p.providerId === 'password');
+  if (isPassword) {
+    console.log('[useAuth] Password sign-in, waiting for registration write...');
+    await new Promise(r => setTimeout(r, 2000));
+    snap = await getDoc(ref);
+    if (snap.exists()) {
+      console.log('[useAuth] Registration write found on retry.');
+      return snap.data();
+    }
   }
 
   // First login — check if there is a pre-registered user with this email
@@ -112,15 +123,16 @@ async function fetchOrCreateUser(fbUser: FirebaseUser): Promise<AppUser> {
     }
   }
 
-  // First login (no match) — create user doc
+  // First login (no match) — create user doc with safe parent role
   const newUser: AppUser = {
     id: fbUser.uid,
     uid: fbUser.uid,
     email: fbUser.email ?? '',
     displayName: fbUser.displayName ?? fbUser.email ?? 'Utente',
     photoURL: fbUser.photoURL ?? undefined,
-    role: 'owner', // default role
-    isActive: true,
+    role: 'parent', // CRITICAL: Default role is ALWAYS 'parent', NEVER 'owner'
+    schoolId: 'OFLsxTdw5F2aHEvlj1RU', // Hard-locked single-tenant Tropical Style
+    isActive: false, // Default inactive until registration approved
     createdAt: nowTimestamp(),
     updatedAt: nowTimestamp(),
   };

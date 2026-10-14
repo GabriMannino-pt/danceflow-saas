@@ -1,22 +1,31 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Users, BookOpen,
-  ClipboardCheck, Calendar,
+  ClipboardCheck, Calendar, User,
 } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { cn } from '@/lib/utils';
 
-const tabItems = [
-  { to: '/dashboard',  icon: <LayoutDashboard size={22} />, label: 'Home' },
-  { to: '/students',   icon: <Users size={22} />,           label: 'Allievi' },
-  { to: '/courses',    icon: <BookOpen size={22} />,        label: 'Corsi' },
-  { to: '/attendance', icon: <ClipboardCheck size={22} />,  label: 'Presenze' },
-  { to: '/calendar',   icon: <Calendar size={22} />,        label: 'Calendario' },
-];
-
 export function BottomTabBar() {
   const user = useAuthStore((s) => s.user);
   if (!user) return null;
+
+  const isTeacher = user.role === 'teacher';
+
+  const tabItems = isTeacher
+    ? [
+        { to: '/attendance', icon: <ClipboardCheck size={22} />, label: 'Presenze' },
+        { to: '/dashboard',  icon: <LayoutDashboard size={22} />, label: 'Lezioni' },
+        { to: '/calendar',   icon: <Calendar size={22} />,        label: 'Calendario' },
+        { to: '/profile',    icon: <User size={22} />,            label: 'Profilo' },
+      ]
+    : [
+        { to: '/dashboard',  icon: <LayoutDashboard size={22} />, label: 'Home' },
+        { to: '/students',   icon: <Users size={22} />,           label: 'Allievi' },
+        { to: '/courses',    icon: <BookOpen size={22} />,        label: 'Corsi' },
+        { to: '/attendance', icon: <ClipboardCheck size={22} />,  label: 'Presenze' },
+        { to: '/calendar',   icon: <Calendar size={22} />,        label: 'Calendario' },
+      ];
 
   return (
     <nav

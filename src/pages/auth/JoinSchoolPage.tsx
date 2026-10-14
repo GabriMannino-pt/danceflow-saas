@@ -201,6 +201,7 @@ export default function JoinSchoolPage() {
                     value={parentEmail}
                     onChange={(e: any) => setParentEmail(e.target.value)}
                     required
+                    autoComplete='username'
                   />
                   <Input
                     type='password'
@@ -209,6 +210,7 @@ export default function JoinSchoolPage() {
                     value={parentPassword}
                     onChange={(e: any) => setParentPassword(e.target.value)}
                     required
+                    autoComplete='new-password'
                   />
                 </div>
 

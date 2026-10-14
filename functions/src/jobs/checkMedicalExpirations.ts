@@ -4,34 +4,27 @@ import * as admin from 'firebase-admin';
 /**
  * Helper to send a message via WhatsApp Business API / Twilio
  */
-async function sendWhatsAppMessage(
-  db: admin.firestore.Firestore,
-  schoolId: string,
-  toPhone: string,
-  text: string
-): Promise<boolean> {
-  console.log(`[WhatsApp Hub] Preparing message for school ${schoolId} to ${toPhone}: "${text}"`);
+async function sendWhatsAppMessage(toPhone: string, text: string): Promise<boolean> {
+  console.log(`[WhatsApp Hub] Preparing message to ${toPhone}: "${text}"`);
+  
+  // Twilio / WhatsApp Business API credentials placeholder
+  const accountSid = process.env.TWILIO_ACCOUNT_SID || 'AC_MOCK_ACCOUNT_SID';
+  const authToken = process.env.TWILIO_AUTH_TOKEN || 'MOCK_AUTH_TOKEN';
+  const fromWhatsAppNumber = process.env.TWILIO_WHATSAPP_FROM || 'whatsapp:+14155238886';
+  
+  if (accountSid === 'AC_MOCK_ACCOUNT_SID' || authToken === 'MOCK_AUTH_TOKEN') {
+    console.log(`[WhatsApp Hub] Mocking WhatsApp send to ${toPhone} (Credentials not configured).`);
+    return true;
+  }
+  
+  const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
+  const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
   
   try {
-    const schoolSnap = await db.collection('schools').doc(schoolId).get();
-    const schoolData = schoolSnap.data();
-    const whatsappConfig = schoolData?.whatsappConfig;
-
-    const accountSid = whatsappConfig?.apiSid;
-    const authToken = whatsappConfig?.apiToken;
-    const fromWhatsAppNumber = whatsappConfig?.phoneNumber;
-
-    if (!accountSid || !authToken || !fromWhatsAppNumber) {
-      console.log(`[WhatsApp Hub] School ${schoolId} does not have WhatsApp credentials configured (whatsappConfig). Falling back to mock/log.`);
-      return true;
-    }
-    
-    const url = `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`;
-    const authHeader = 'Basic ' + Buffer.from(`${accountSid}:${authToken}`).toString('base64');
     const formattedPhone = toPhone.startsWith('+') ? toPhone : `+39${toPhone}`;
     
     const params = new URLSearchParams();
-    params.append('From', fromWhatsAppNumber.startsWith('whatsapp:') ? fromWhatsAppNumber : `whatsapp:${fromWhatsAppNumber}`);
+    params.append('From', fromWhatsAppNumber);
     params.append('To', `whatsapp:${formattedPhone}`);
     params.append('Body', text);
     
@@ -46,19 +39,18 @@ async function sendWhatsAppMessage(
     
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[WhatsApp Hub] Twilio API error for school ${schoolId}: ${response.status} - ${errorText}`);
+      console.error(`[WhatsApp Hub] Twilio API error: ${response.status} - ${errorText}`);
       return false;
     }
     
     const data: any = await response.json();
-    console.log(`[WhatsApp Hub] Message sent successfully for school ${schoolId}. Twilio SID: ${data.sid}`);
+    console.log(`[WhatsApp Hub] Message sent successfully. Twilio SID: ${data.sid}`);
     return true;
   } catch (err) {
-    console.error(`[WhatsApp Hub] Failed to send WhatsApp message for school ${schoolId} via Twilio API:`, err);
+    console.error('[WhatsApp Hub] Failed to send WhatsApp message via Twilio API:', err);
     return false;
   }
 }
-
 
 export const checkMedicalExpirations = onSchedule(
   {
@@ -275,7 +267,7 @@ export const checkMedicalExpirations = onSchedule(
         const parentPhone = student.contact?.parentPhone || student.contact?.studentPhone;
         if (parentPhone) {
           const whatsappText = `Ciao ${parentName}, ti ricordiamo che il certificato medico di ${studentName} iscritto a ${schoolName} scadrà il ${formattedExpiryDate}. Per motivi legali e assicurativi, ti invitiamo a caricare il nuovo certificato prima di tale data accedendo direttamente al tuo Portale Allievi. Grazie!`;
-          await sendWhatsAppMessage(db, schoolId, parentPhone, whatsappText);
+          await sendWhatsAppMessage(parentPhone, whatsappText);
         } else {
           console.warn(`[checkMedicalExpirations] Student ${studentId} does not have parent or student phone for WhatsApp reminder.`);
         }

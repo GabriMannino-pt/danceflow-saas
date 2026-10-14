@@ -4,14 +4,14 @@ type BadgeVariant = 'brand' | 'gold' | 'coral' | 'teal' | 'gray' | 'success' | '
 type BadgeSize    = 'sm' | 'md';
 
 const variantClasses: Record<BadgeVariant, string> = {
-  brand:   'bg-brand-500/20 text-brand-300 border border-brand-500/30',
-  gold:    'bg-gold-500/20 text-gold-300 border border-gold-400/30',
-  coral:   'bg-coral-500/20 text-coral-300 border border-coral-500/30',
-  teal:    'bg-teal-500/20 text-teal-300 border border-teal-500/30',
-  gray:    'bg-white/5 text-white/50 border border-white/10',
-  success: 'bg-teal-500/20 text-teal-300 border border-teal-500/30',
-  warning: 'bg-gold-500/20 text-gold-300 border border-gold-400/30',
-  danger:  'bg-coral-500/20 text-coral-400 border border-coral-500/30',
+  brand:   'bg-brand-500/10 text-brand-400 border border-brand-500/30',
+  gold:    'bg-amber-500/10 text-amber-400 border border-amber-500/30',
+  coral:   'bg-red-500/10 text-red-400 border border-red-500/30',
+  teal:    'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30',
+  gray:    'bg-white/5 text-white/60 border border-white/10',
+  success: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30',
+  warning: 'bg-amber-500/10 text-amber-400 border border-amber-500/30',
+  danger:  'bg-red-500/10 text-red-400 border border-red-500/30',
 };
 
 const sizeClasses: Record<BadgeSize, string> = {
@@ -41,9 +41,9 @@ export function Badge({ children, variant = 'brand', size = 'md', dot, className
         <span
           className={cn(
             'w-1.5 h-1.5 rounded-full flex-shrink-0',
-            variant === 'success' || variant === 'teal' ? 'bg-teal-400' :
-            variant === 'danger'  || variant === 'coral' ? 'bg-coral-400' :
-            variant === 'warning' || variant === 'gold' ? 'bg-gold-400' :
+            variant === 'success' || variant === 'teal' ? 'bg-emerald-400' :
+            variant === 'danger'  || variant === 'coral' ? 'bg-red-400' :
+            variant === 'warning' || variant === 'gold' ? 'bg-amber-400' :
             'bg-brand-400'
           )}
           aria-hidden='true'

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useForm, useFieldArray } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -8,7 +8,7 @@ import { COLLECTIONS, userConverter } from '@/lib/converters';
 import { useCourses } from '@/hooks/useCourses';
 import { useAuthStore } from '@/stores/authStore';
 import { Modal, ModalFooter, Input, Select, Button, Textarea } from '@/components/ui';
-import { DANCE_STYLES, DAYS_IT } from '@/lib/constants';
+import { DANCE_STYLES, DAYS_IT, getAcademicYearOptions, getCurrentAcademicYear } from '@/lib/constants';
 import type { Course, AppUser, CourseSchedule } from '@/types';
 import { Plus, Trash2 } from 'lucide-react';
 
@@ -48,6 +48,8 @@ export function CourseForm({ isOpen, onClose, course, onSuccess }: CourseFormPro
   const schoolId = useAuthStore((s) => s.user?.schoolId);
   const [teachers, setTeachers] = useState<AppUser[]>([]);
 
+  const academicYearOptions = useMemo(() => getAcademicYearOptions(), []);
+
   const defaultValues: Partial<CourseFormValues> = {
     name: course?.name ?? '',
     style: course?.style ?? DANCE_STYLES[0],
@@ -58,8 +60,15 @@ export function CourseForm({ isOpen, onClose, course, onSuccess }: CourseFormPro
     monthlyFee: course?.fee?.monthly ?? 0,
     registrationFee: course?.fee?.registration ?? 0,
     colorHex: course?.colorHex ?? '#8b5cf6', // default brand purple
-    academicYear: course?.academicYear ?? `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`,
-    schedule: course?.schedule ?? [],
+    academicYear: course?.academicYear ?? getCurrentAcademicYear(),
+    schedule: course?.schedule && course.schedule.length > 0
+      ? course.schedule
+      : (!course
+          ? [
+              { dayOfWeek: 1, startTime: '17:00', endTime: '18:00' },
+              { dayOfWeek: 3, startTime: '17:00', endTime: '18:00' }
+            ]
+          : []),
     isActive: course?.isActive ?? true,
     description: course?.description ?? '',
   };
@@ -161,11 +170,7 @@ export function CourseForm({ isOpen, onClose, course, onSuccess }: CourseFormPro
             <Select
               label='Anno Accademico'
               required
-              options={[
-                { value: '2023-2024', label: '2023/2024' },
-                { value: '2024-2025', label: '2024/2025' },
-                { value: '2025-2026', label: '2025/2026' },
-              ]}
+              options={academicYearOptions}
               error={errors.academicYear?.message}
               {...register('academicYear')}
             />
@@ -257,24 +262,59 @@ export function CourseForm({ isOpen, onClose, course, onSuccess }: CourseFormPro
 
         {/* Schedule */}
         <div className='space-y-4'>
-          <div className='flex justify-between items-center border-b border-white/5 pb-1'>
-            <h3 className='text-xs font-semibold uppercase tracking-wider text-brand-400'>
-              Programmazione Settimanale
-            </h3>
+          <div className='flex justify-between items-center border-b border-white/5 pb-2'>
+            <div>
+              <h3 className='text-xs font-semibold uppercase tracking-wider text-brand-400'>
+                Programmazione Settimanale (Giorni e Orari)
+              </h3>
+              <p className='text-[11px] text-white/40'>
+                Configura i giorni e orari di lezione (es. Lunedì e Mercoledì)
+              </p>
+            </div>
             <Button
               type='button'
               variant='outline'
               size='sm'
+              className='text-brand-300 border-brand-500/30 hover:bg-brand-500/10'
               icon={<Plus size={14} />}
-              onClick={() => append({ dayOfWeek: 1, startTime: '17:00', endTime: '18:00' })}
+              onClick={() => {
+                const existingDays = fields.map((f) => f.dayOfWeek);
+                let nextDay = 3;
+                if (existingDays.includes(1) && !existingDays.includes(3)) nextDay = 3;
+                else if (existingDays.includes(2) && !existingDays.includes(4)) nextDay = 4;
+                else if (existingDays.includes(1) && existingDays.includes(3) && !existingDays.includes(5)) nextDay = 5;
+                else {
+                  for (let d = 1; d <= 6; d++) {
+                    if (!existingDays.includes(d)) {
+                      nextDay = d;
+                      break;
+                    }
+                  }
+                }
+                const lastSlot = fields[fields.length - 1];
+                append({
+                  dayOfWeek: nextDay,
+                  startTime: lastSlot?.startTime || '17:00',
+                  endTime: lastSlot?.endTime || '18:00',
+                });
+              }}
             >
-              Aggiungi Orario
+              + Aggiungi Giorno / Orario
             </Button>
           </div>
           
           {fields.length === 0 ? (
-            <div className='text-sm text-white/40 text-center py-4 bg-white/5 rounded-xl border border-white/5'>
-              Nessun orario configurato. Clicca su "Aggiungi Orario".
+            <div className='text-center py-6 bg-white/5 rounded-xl border border-dashed border-white/10 space-y-2'>
+              <p className='text-sm text-white/60'>Nessun giorno di lezione inserito per questo corso.</p>
+              <Button
+                type='button'
+                size='sm'
+                variant='outline'
+                icon={<Plus size={14} />}
+                onClick={() => append({ dayOfWeek: 1, startTime: '17:00', endTime: '18:00' })}
+              >
+                + Aggiungi Giorno / Orario
+              </Button>
             </div>
           ) : (
             <div className='space-y-3'>

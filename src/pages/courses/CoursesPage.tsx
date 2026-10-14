@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useCourses } from '@/hooks/useCourses';
 import { useSchoolStore } from '@/stores/schoolStore';
+import { useAuthStore } from '@/stores/authStore';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Card, Skeleton, EmptyState, Badge, Button, Input, Select } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
@@ -17,8 +18,11 @@ import {
   UserX,
   Calendar,
   ChevronRight,
-  Trash2
+  Trash2,
+  Printer,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
+import { generateSecretaryPaymentsRegistryPDF } from '@/services/pdf/SecretaryPaymentsRegistryPdfBuilder';
 
 export default function CoursesPage() {
   const navigate = useNavigate();
@@ -26,7 +30,9 @@ export default function CoursesPage() {
   // Initialize real-time courses listening
   const { deleteCourse } = useCourses();
 
-  const { courses, isLoadingCourses, students } = useSchoolStore();
+  const { courses, isLoadingCourses, students, activeSchool } = useSchoolStore();
+  const user = useAuthStore((s) => s.user);
+  const isTeacher = user?.role === 'teacher';
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
@@ -34,6 +40,32 @@ export default function CoursesPage() {
 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
+  const [isPrintingAll, setIsPrintingAll] = useState(false);
+
+  const handlePrintSecretaryRegistry = () => {
+    try {
+      setIsPrintingAll(true);
+      const activeStudents = students.filter((s) => !s.isDeleted && s.isActive);
+      if (activeStudents.length === 0) {
+        toast.error('Nessun allievo attivo da includere nel registro.');
+        return;
+      }
+      const doc = generateSecretaryPaymentsRegistryPDF({
+        students,
+        courses,
+        school: activeSchool,
+        academicYear: '2025/2026',
+        emptyRowsCount: 10,
+      });
+      doc.save(`Registro_Generale_Incassi_Segreteria_${new Date().getFullYear()}.pdf`);
+      toast.success(`Scaricato Registro Generale Incassi Segreteria (${activeStudents.length} allievi)!`);
+    } catch (err: any) {
+      console.error('[CoursesPage] Error generating secretary registry PDF:', err);
+      toast.error('Impossibile generare il registro segreteria.');
+    } finally {
+      setIsPrintingAll(false);
+    }
+  };
 
   const handleDeleteCourse = async (courseId: string, e: React.MouseEvent) => {
     e.stopPropagation(); // prevent card click
@@ -53,18 +85,31 @@ export default function CoursesPage() {
 
   // ─── Computations & Stats ───────────────────────────────────────────────────
   const stats = useMemo(() => {
-    const activeCourses = courses.filter((c) => c.isActive).length;
-    let totalEnrolled = 0;
+    const activeCourses = courses.filter((c) => c.isActive && !c.isDeleted).length;
+    let totalCourseEnrollments = 0;
     let withoutTeacher = 0;
 
     courses.forEach(c => {
-      totalEnrolled += getEnrolledCount(c.id);
+      totalCourseEnrollments += getEnrolledCount(c.id);
       if (!c.teacherIds || c.teacherIds.length === 0) {
         withoutTeacher++;
       }
     });
 
-    return { total: courses.length, activeCourses, totalEnrolled, withoutTeacher };
+    const uniqueEnrolledStudents = students.filter(
+      (s) => !s.isDeleted && s.isActive && (s.enrolledCourseIds || []).length > 0
+    ).length;
+
+    const totalActiveStudents = students.filter((s) => !s.isDeleted && s.isActive).length;
+
+    return {
+      total: courses.length,
+      activeCourses,
+      uniqueEnrolledStudents,
+      totalCourseEnrollments,
+      totalActiveStudents,
+      withoutTeacher
+    };
   }, [courses, students]);
 
   // ─── Filtering Logic ────────────────────────────────────────────────────────
@@ -106,15 +151,25 @@ export default function CoursesPage() {
           title='Corsi e Classi'
           subtitle='Gestisci i corsi, le classi, e le programmazioni settimanali.'
           actions={
-            <Button
-              onClick={() => {
-                setEditingCourse(null);
-                setIsFormOpen(true);
-              }}
-              icon={<Plus size={18} />}
-            >
-              Nuovo Corso
-            </Button>
+            <div className='flex items-center gap-3'>
+              <Button
+                variant='outline'
+                onClick={handlePrintSecretaryRegistry}
+                disabled={isPrintingAll}
+                icon={<Printer size={18} />}
+              >
+                {isPrintingAll ? 'Generazione...' : 'Stampa Registro Incassi Segreteria (A-Z)'}
+              </Button>
+              <Button
+                onClick={() => {
+                  setEditingCourse(null);
+                  setIsFormOpen(true);
+                }}
+                icon={<Plus size={18} />}
+              >
+                Nuovo Corso
+              </Button>
+            </div>
           }
         />
 
@@ -140,8 +195,15 @@ export default function CoursesPage() {
                 <Users size={18} />
               </div>
               <div>
-                <p className='text-xs text-white/50'>Totale Iscritti</p>
-                <p className='text-xl font-display font-bold text-teal-400'>{stats.totalEnrolled}</p>
+                <p className='text-xs text-white/50'>Allievi Iscritti ai Corsi</p>
+                <div className='flex items-baseline gap-1.5'>
+                  <p className='text-xl font-display font-bold text-teal-400'>
+                    {stats.uniqueEnrolledStudents}
+                  </p>
+                  <span className='text-xs text-white/40'>
+                    / {stats.totalActiveStudents} attivi ({stats.totalCourseEnrollments} frequenze)
+                  </span>
+                </div>
               </div>
             </div>
           </Card>
@@ -236,6 +298,7 @@ export default function CoursesPage() {
               return (
                 <Card
                   key={course.id}
+                  as="div"
                   onClick={() => navigate(`/courses/${course.id}`)}
                   className='p-0 overflow-hidden hover:bg-white/[0.03] transition-colors cursor-pointer group flex flex-col h-full border border-white/5'
                 >
@@ -283,13 +346,15 @@ export default function CoursesPage() {
                       </div>
 
                       <div className='flex gap-1.5' onClick={(e) => e.stopPropagation()}>
-                        <button
-                          onClick={(e) => handleDeleteCourse(course.id, e)}
-                          className='p-2 rounded-xl bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-colors flex items-center justify-center border border-rose-500/20 active:scale-90'
-                          title="Elimina corso"
-                        >
-                          <Trash2 size={16} />
-                        </button>
+                        {!isTeacher && (
+                          <button
+                            onClick={(e) => handleDeleteCourse(course.id, e)}
+                            className='p-2 rounded-xl bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition-colors flex items-center justify-center border border-rose-500/20 active:scale-90'
+                            title="Elimina corso"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
                         <div className='p-2 rounded-xl bg-white/5 hover:bg-white/10 text-white transition-colors flex items-center justify-center group-hover:bg-brand-500 group-hover:text-white'>
                           <ChevronRight size={16} />
                         </div>

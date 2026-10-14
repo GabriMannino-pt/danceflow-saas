@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, onSnapshot, collection, updateDoc, writeBatch } from 'firebase/firestore';
+import { doc, onSnapshot, collection, updateDoc, writeBatch, setDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { useEvents } from '@/hooks/useEvents';
 import { usePayments } from '@/hooks/usePayments';
@@ -32,7 +32,6 @@ export default function EventDetailPage() {
   const { addParticipant, removeParticipant } = useEvents();
   
   const { 
-    createPayment, 
     payments,
     registerInstallment,
     updateInstallment,
@@ -45,6 +44,17 @@ export default function EventDetailPage() {
   const [event, setEvent] = useState<Event | null>(null);
   const [selectedStudentId, setSelectedStudentId] = useState('');
   const [registering, setRegistering] = useState(false);
+
+  // Quick enrollment custom fee & deposit states
+  const [enrollCustomFee, setEnrollCustomFee] = useState<string>('');
+  const [enrollInitialDeposit, setEnrollInitialDeposit] = useState<string>('');
+  const [enrollDepositMethod, setEnrollDepositMethod] = useState<PaymentMethod>('cash');
+
+  // Edit custom fee modal states
+  const [editingFeePayment, setEditingFeePayment] = useState<Payment | null>(null);
+  const [editingStudent, setEditingStudent] = useState<any | null>(null);
+  const [newFeeAmount, setNewFeeAmount] = useState<string>('');
+  const [editFeeNotes, setEditFeeNotes] = useState<string>('');
 
   // Manage modal states
   const [selectedManagePayment, setSelectedManagePayment] = useState<Payment | null>(null);
@@ -131,21 +141,23 @@ export default function EventDetailPage() {
       const student = students.find((s) => s.id === p.studentId);
       const hasCustomFee = student && student.customShowFee !== undefined && student.customShowFee !== null;
       
-      const total = (p.type === 'event' && hasCustomFee)
-        ? student.customShowFee!
-        : (p.totalAmount ?? p.amount);
+      const total = (p.totalAmount !== undefined && p.totalAmount !== null)
+        ? p.totalAmount
+        : (p.type === 'event' && hasCustomFee)
+          ? student.customShowFee!
+          : (p.amount ?? 0);
       
       const paid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
       const remaining = Math.max(0, total - paid);
       
       let status = p.status;
-      if (status !== 'cancelled' && status !== 'paid') {
-        if (paid >= total) {
+      if (status !== 'cancelled') {
+        if (total === 0 || paid >= total) {
           status = 'paid';
         } else if (paid > 0) {
           status = 'deposit_paid';
         } else {
-          const isOverdue = p.dueDate.toDate() < new Date();
+          const isOverdue = p.dueDate ? p.dueDate.toDate() < new Date() : false;
           status = isOverdue ? 'overdue' : 'pending';
         }
       }
@@ -187,36 +199,154 @@ export default function EventDetailPage() {
     return resolvedEventPayments.find(p => p.id === selectedManagePayment.id) || null;
   }, [selectedManagePayment, resolvedEventPayments]);
 
-  // Iscrizione di un allievo
+  // Effetto per pre-impostare la quota nel box di iscrizione rapida
+  useEffect(() => {
+    if (selectedStudentId) {
+      const student = students.find((s) => s.id === selectedStudentId);
+      const defaultFee = (event?.type === 'show' && student?.customShowFee !== undefined && student?.customShowFee !== null)
+        ? student.customShowFee
+        : (event?.fee ?? 0);
+      setEnrollCustomFee(defaultFee.toString());
+      setEnrollInitialDeposit('');
+    } else {
+      setEnrollCustomFee(event?.fee ? event.fee.toString() : '0');
+      setEnrollInitialDeposit('');
+    }
+  }, [selectedStudentId, event?.fee, event?.type, students]);
+
+  // Iscrizione di un allievo con quota personalizzata e acconto opzionale
   const handleAdd = async () => {
-    if (!event || !selectedStudentId) return;
+    if (!event || !selectedStudentId || !schoolId) return;
 
     setRegistering(true);
     try {
       // 1. Aggiungi partecipante all'evento
       await addParticipant(event.id, selectedStudentId);
 
-      // 2. Se l'evento ha una quota prevista, genera automaticamente un pagamento in sospeso
-      if (event.fee && event.fee > 0) {
-        await createPayment({
-          studentId: selectedStudentId,
-          courseId: event.id, // usiamo courseId per legare l'evento
-          description: `Quota Iscrizione: ${event.name}`,
-          amount: event.fee,
-          currency: 'EUR',
-          status: 'pending',
-          dueDate: event.startDate, // scade il giorno dell'evento
-          type: 'event',
+      // 2. Calcola quota e acconto digitati dall'amministratore
+      const feeToCharge = Math.max(0, parseFloat(enrollCustomFee) || 0);
+      const initialDeposit = Math.max(0, parseFloat(enrollInitialDeposit) || 0);
+
+      const paymentRef = doc(collection(db, COLLECTIONS.payments(schoolId))).withConverter(paymentConverter);
+      const initialInstallments = [];
+      let initialPaid = 0;
+      let initialStatus: Payment['status'] = 'pending';
+
+      if (feeToCharge === 0) {
+        initialStatus = 'paid';
+      } else if (initialDeposit > 0) {
+        initialPaid = Math.min(initialDeposit, feeToCharge);
+        initialInstallments.push({
+          amount: initialPaid,
+          date: nowTimestamp(),
+          method: enrollDepositMethod,
+          receiptEmitted: false,
+          notes: 'Acconto iniziale iscrizione'
         });
+        initialStatus = initialPaid >= feeToCharge ? 'paid' : 'deposit_paid';
       }
 
+      const newPayment: Payment = {
+        id: paymentRef.id,
+        schoolId,
+        studentId: selectedStudentId,
+        courseId: event.id,
+        description: `Quota: ${event.name}`,
+        amount: feeToCharge,
+        totalAmount: feeToCharge,
+        paidAmount: initialPaid,
+        remainingAmount: Math.max(0, feeToCharge - initialPaid),
+        currency: 'EUR',
+        status: initialStatus,
+        dueDate: event.startDate,
+        type: 'event',
+        payments: initialInstallments,
+        createdAt: nowTimestamp(),
+        updatedAt: nowTimestamp(),
+        notes: feeToCharge === 0 ? 'Quota Esente / Gratuito' : (initialDeposit > 0 ? `Iscritto con acconto di €${initialPaid.toFixed(2)}` : undefined),
+      };
+
+      await setDoc(paymentRef, newPayment);
+
       setSelectedStudentId('');
+      setEnrollCustomFee(event.fee ? event.fee.toString() : '0');
+      setEnrollInitialDeposit('');
       toast.success('Allievo iscritto con successo all\'evento!');
     } catch (err) {
       console.error('[EventDetailPage] Add participant failed:', err);
       toast.error('Impossibile iscrivere l\'allievo.');
     } finally {
       setRegistering(false);
+    }
+  };
+
+  // Apertura modale modifica quota partecipante
+  const openEditFeeModal = (student: any, payment?: Payment | null) => {
+    setEditingStudent(student);
+    setEditingFeePayment(payment || null);
+    const currentFee = payment ? (payment.totalAmount ?? payment.amount) : (event?.fee ?? 0);
+    setNewFeeAmount(currentFee.toString());
+    setEditFeeNotes(payment?.notes || '');
+  };
+
+  // Salvataggio nuova quota partecipante
+  const handleSaveNewFee = async () => {
+    if (!schoolId || !editingStudent || !event) return;
+    const amount = Math.max(0, parseFloat(newFeeAmount) || 0);
+
+    try {
+      if (editingFeePayment) {
+        const paid = editingFeePayment.paidAmount ?? 0;
+        const remaining = Math.max(0, amount - paid);
+        let status: Payment['status'] = 'pending';
+        if (amount === 0 || paid >= amount) {
+          status = 'paid';
+        } else if (paid > 0) {
+          status = 'deposit_paid';
+        } else {
+          const isOverdue = editingFeePayment.dueDate ? editingFeePayment.dueDate.toDate() < new Date() : false;
+          status = isOverdue ? 'overdue' : 'pending';
+        }
+
+        const ref = doc(db, COLLECTIONS.payments(schoolId), editingFeePayment.id).withConverter(paymentConverter);
+        await updateDoc(ref, {
+          totalAmount: amount,
+          amount: amount,
+          remainingAmount: remaining,
+          status,
+          notes: editFeeNotes ? editFeeNotes : (amount === 0 ? 'Quota Esente / Gratuito' : null),
+          updatedAt: nowTimestamp(),
+        });
+      } else {
+        const paymentRef = doc(collection(db, COLLECTIONS.payments(schoolId))).withConverter(paymentConverter);
+        const newPayment: Payment = {
+          id: paymentRef.id,
+          schoolId,
+          studentId: editingStudent.id,
+          courseId: event.id,
+          description: `Quota: ${event.name}`,
+          amount,
+          totalAmount: amount,
+          paidAmount: 0,
+          remainingAmount: amount,
+          currency: 'EUR',
+          status: amount === 0 ? 'paid' : 'pending',
+          dueDate: event.startDate,
+          type: 'event',
+          payments: [],
+          notes: editFeeNotes ? editFeeNotes : (amount === 0 ? 'Quota Esente / Gratuito' : undefined),
+          createdAt: nowTimestamp(),
+          updatedAt: nowTimestamp(),
+        };
+        await setDoc(paymentRef, newPayment);
+      }
+
+      toast.success('Quota dell\'allievo aggiornata con successo!');
+      setEditingFeePayment(null);
+      setEditingStudent(null);
+    } catch (err) {
+      console.error('[EventDetailPage] handleSaveNewFee error:', err);
+      toast.error('Errore durante il salvataggio della quota.');
     }
   };
 
@@ -670,28 +800,48 @@ export default function EventDetailPage() {
                             </p>
                             {payment ? (
                               <div className='flex flex-col sm:flex-row sm:items-center gap-2 mt-1'>
-                                <Badge
-                                  variant={statusVariant[payment.status] || 'warning'}
-                                  size='sm'
-                                >
-                                  {statusLabel[payment.status] || payment.status.toUpperCase()}
-                                </Badge>
+                                {payment.totalAmount === 0 ? (
+                                  <Badge variant='teal' size='sm'>GRATUITO / ESENTE</Badge>
+                                ) : (
+                                  <Badge
+                                    variant={statusVariant[payment.status] || 'warning'}
+                                    size='sm'
+                                  >
+                                    {statusLabel[payment.status] || payment.status.toUpperCase()}
+                                  </Badge>
+                                )}
                                 <span className="text-xs text-white/40">
-                                  Incassato: €{(payment.paidAmount ?? 0).toFixed(2)} su €{(payment.totalAmount ?? 0).toFixed(2)}
+                                  {payment.totalAmount === 0 
+                                    ? 'Nessun importo dovuto (0€)' 
+                                    : `Incassato: €${(payment.paidAmount ?? 0).toFixed(2)} su €${(payment.totalAmount ?? 0).toFixed(2)}${payment.remainingAmount ? ` (Residuo: €${payment.remainingAmount.toFixed(2)})` : ''}`
+                                  }
                                 </span>
+                                {payment.notes && (
+                                  <span className="text-[10px] text-brand-300/80 bg-brand-500/10 px-1.5 py-0.5 rounded border border-brand-500/20">
+                                    {payment.notes}
+                                  </span>
+                                )}
                               </div>
                             ) : (
-                              event.fee && event.fee > 0 && (
-                                <span className="text-xs text-coral-400 mt-1 block">Nessun pagamento registrato</span>
-                              )
+                              <span className="text-xs text-coral-400 mt-1 block">Nessuna quota registrata</span>
                             )}
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap justify-end">
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            onClick={() => openEditFeeModal(student, payment)}
+                            icon={<Edit size={12} />}
+                            title="Modifica Quota di questo allievo"
+                          >
+                            Quota
+                          </Button>
+
                           {payment && (
                             <>
-                              {(payment.status === 'pending' || payment.status === 'deposit_paid' || payment.status === 'overdue') && (
+                              {payment.totalAmount > 0 && (payment.status === 'pending' || payment.status === 'deposit_paid' || payment.status === 'overdue') && (
                                 <Button
                                   size="xs"
                                   onClick={() => setPayingPayment(payment)}
@@ -746,6 +896,61 @@ export default function EventDetailPage() {
                       ...nonParticipantsOptions
                     ]}
                   />
+
+                  {selectedStudentId && (
+                    <div className='p-3 bg-black/30 rounded-xl border border-white/10 space-y-3 animate-fade-in-up'>
+                      <div className='flex items-center justify-between'>
+                        <span className='text-xs font-semibold text-brand-300 uppercase tracking-wider'>Quota & Acconto</span>
+                        <button
+                          type='button'
+                          onClick={() => setEnrollCustomFee('0')}
+                          className='text-[11px] text-teal-400 hover:underline cursor-pointer'
+                        >
+                          Gratuito / Esente (0€)
+                        </button>
+                      </div>
+
+                      <Input
+                        label='Quota di Partecipazione (€)'
+                        type='number'
+                        step='0.01'
+                        value={enrollCustomFee}
+                        onChange={(e) => setEnrollCustomFee(e.target.value)}
+                        placeholder='es. 50'
+                      />
+
+                      <div className='pt-1'>
+                        <Input
+                          label='Acconto Versato Subito (€ - Opzionale)'
+                          type='number'
+                          step='0.01'
+                          value={enrollInitialDeposit}
+                          onChange={(e) => setEnrollInitialDeposit(e.target.value)}
+                          placeholder='0.00'
+                        />
+                      </div>
+
+                      {Number(enrollInitialDeposit) > 0 && (
+                        <div className='space-y-2 pt-1'>
+                          <Select
+                            label='Metodo Acconto'
+                            value={enrollDepositMethod}
+                            onChange={(e) => setEnrollDepositMethod(e.target.value as PaymentMethod)}
+                            options={[
+                              { value: 'cash', label: 'Contanti' },
+                              { value: 'card', label: 'Carta / POS' },
+                              { value: 'bank_transfer', label: 'Bonifico Bancario' },
+                              { value: 'other', label: 'Altro' },
+                            ]}
+                          />
+                          <p className='text-[11px] text-teal-300 font-medium'>
+                            Residuo da saldare: €{Math.max(0, (parseFloat(enrollCustomFee) || 0) - (parseFloat(enrollInitialDeposit) || 0)).toFixed(2)}
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <Button
                     onClick={handleAdd}
                     loading={registering}
@@ -1101,6 +1306,94 @@ export default function EventDetailPage() {
                   )}
                 </div>
               )}
+            </div>
+          )}
+        </Modal>
+
+        {/* Modale Modifica Quota Personalizzata Allievo */}
+        <Modal
+          isOpen={!!editingStudent}
+          onClose={() => {
+            setEditingStudent(null);
+            setEditingFeePayment(null);
+          }}
+          title={`Quota Partecipazione - ${editingStudent?.firstName || ''} ${editingStudent?.lastName || ''}`}
+          size="md"
+        >
+          {editingStudent && (
+            <div className="space-y-4">
+              <div className="p-3 bg-brand-500/10 border border-brand-500/20 rounded-xl space-y-1">
+                <p className="text-xs text-white/50">Evento / Gara:</p>
+                <p className="text-sm font-semibold text-white">{event.name}</p>
+                {editingFeePayment && (
+                  <div className="pt-2 flex items-center justify-between text-xs text-brand-300">
+                    <span>Già Incassato: €{(editingFeePayment.paidAmount ?? 0).toFixed(2)}</span>
+                    <span>Quota Attuale: €{(editingFeePayment.totalAmount ?? 0).toFixed(2)}</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-white/80">Importo Quota Totale (€)</span>
+                  <button
+                    type="button"
+                    onClick={() => setNewFeeAmount('0')}
+                    className="text-xs text-teal-400 hover:underline cursor-pointer font-medium"
+                  >
+                    Imposta Gratuito / Esente (0€)
+                  </button>
+                </div>
+
+                <Input
+                  label="Nuova Quota Totale (€)"
+                  type="number"
+                  step="0.01"
+                  value={newFeeAmount}
+                  onChange={(e) => setNewFeeAmount(e.target.value)}
+                  placeholder="es. 35.00"
+                />
+
+                {editingFeePayment && (editingFeePayment.paidAmount ?? 0) > 0 && (
+                  <div className="p-2.5 rounded-lg bg-white/5 border border-white/10 text-xs">
+                    <span className="text-white/60">Nuovo residuo da saldare: </span>
+                    <strong className="text-teal-300">
+                      €{Math.max(0, (parseFloat(newFeeAmount) || 0) - (editingFeePayment.paidAmount ?? 0)).toFixed(2)}
+                    </strong>
+                    {(parseFloat(newFeeAmount) || 0) < (editingFeePayment.paidAmount ?? 0) && (
+                      <p className="text-coral-400 mt-1">
+                        ⚠️ L'importo versato finora (€{editingFeePayment.paidAmount?.toFixed(2)}) supera la nuova quota impostata!
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <Input
+                  label="Note / Motivazione Quota (Opzionale)"
+                  placeholder="Es. Sconto fratelli / 2 discipline / borsa di studio"
+                  value={editFeeNotes}
+                  onChange={(e) => setEditFeeNotes(e.target.value)}
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <Button
+                  variant="secondary"
+                  className="flex-1"
+                  onClick={() => {
+                    setEditingStudent(null);
+                    setEditingFeePayment(null);
+                  }}
+                >
+                  Annulla
+                </Button>
+                <Button
+                  className="flex-1"
+                  onClick={handleSaveNewFee}
+                >
+                  Salva Quota
+                </Button>
+              </div>
             </div>
           )}
         </Modal>

@@ -30,6 +30,12 @@ export function RoleGuard({ allowedRoles, children, redirectTo = '/login' }: Rol
   }
 
   if (!allowedRoles.includes(user.role)) {
+    if (redirectTo && redirectTo !== '/login') {
+      return <Navigate to={redirectTo} replace />;
+    }
+    if (user.role === 'teacher') {
+      return <Navigate to='/attendance' replace />;
+    }
     return <Navigate to='/unauthorized' replace />;
   }
 
@@ -58,6 +64,11 @@ export function AuthGuard({ children }: AuthGuardProps) {
   const isUserSuperAdmin = user.role === 'superadmin' || user.isSuperAdmin === true;
   if (activeSchool?.suspended && !isUserSuperAdmin) {
     return <Navigate to="/suspended" replace />;
+  }
+
+  // CRITICAL SECURITY CHECK: Parents must NEVER access admin layout or dashboard
+  if (user.role === 'parent') {
+    return <Navigate to='/parent' replace />;
   }
 
   return <>{children}</>;
@@ -93,6 +104,9 @@ export function GuestGuard({ children }: AuthGuardProps) {
   }
 
   if (user) {
+    if (user.role === 'parent') {
+      return <Navigate to='/parent' replace />;
+    }
     return <Navigate to='/dashboard' replace />;
   }
 
@@ -102,17 +116,24 @@ export function GuestGuard({ children }: AuthGuardProps) {
 // ─── Full-screen loading skeleton ─────────────────────────────────────────────
 function AppLoadingScreen() {
   return (
-    <div className='fixed inset-0 flex items-center justify-center bg-surface-950'>
-      <div className='flex flex-col items-center gap-4'>
-        <div className='w-16 h-16 rounded-2xl btn-primary-gradient flex items-center justify-center animate-pulse-glow'>
-          <span className='text-3xl'>💃</span>
+    <div className='fixed inset-0 flex items-center justify-center bg-surface-950 z-50'>
+      <div className='flex flex-col items-center gap-4 px-4 text-center'>
+        <div className='bg-white rounded-2xl px-6 py-3.5 shadow-2xl flex items-center justify-center animate-pulse'>
+          <img
+            src='/tropical_logo.png'
+            alt='Tropical Style'
+            className='h-12 w-auto max-w-[200px] object-contain'
+          />
         </div>
-        <p className='text-white/50 text-sm font-body'>Caricamento DanceFlow…</p>
-        <div className='flex gap-1'>
+        <div>
+          <p className='text-white font-display font-semibold text-base tracking-tight'>Tropical Style</p>
+          <p className='text-brand-400 text-xs font-medium uppercase tracking-wider mt-0.5'>Caricamento in corso…</p>
+        </div>
+        <div className='flex gap-1.5 mt-1'>
           {[0, 1, 2].map((i) => (
             <div
               key={i}
-              className='w-2 h-2 rounded-full bg-brand-500 animate-bounce'
+              className='w-2 h-2 rounded-full bg-brand-400 animate-bounce'
               style={{ animationDelay: `${i * 0.15}s` }}
             />
           ))}

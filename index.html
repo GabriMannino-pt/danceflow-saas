@@ -3,23 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      if (window.location.hostname === 'danceflow-saas.web.app' || window.location.hostname === 'danceflow-saas.firebaseapp.com') {
+        window.location.replace('https://www.tropicalstyle.it' + window.location.pathname + window.location.search + window.location.hash);
+      }
+    </script>
 
     <!-- PWA -->
-    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
-    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" href="/tropical_logo.png" />
+    <link rel="apple-touch-icon" href="/tropical_logo.png" />
     <meta name="theme-color" content="#7C3AED" />
     <link rel="manifest" href="/manifest.webmanifest" />
 
     <!-- SEO -->
-    <title>DanceFlow — Gestionale per Scuole di Danza</title>
-    <meta name="description" content="DanceFlow è il gestionale SaaS completo per scuole di danza: allievi, corsi, pagamenti, presenze, comunicazioni e molto altro." />
-    <meta name="keywords" content="gestionale danza, scuola di danza, software danza, SaaS danza" />
-    <meta name="author" content="DanceFlow" />
+    <title>Tropical Style Caribbean School — Gestionale</title>
+    <meta name="description" content="Gestionale ufficiale di Tropical Style Caribbean School (Paternò): registro allievi, corsi, presenze e contabilità." />
+    <meta name="keywords" content="Tropical Style, scuola di danza, caraibico, salsa, bachata, paternò, gestione allievi" />
+    <meta name="author" content="Tropical Style Caribbean School" />
 
     <!-- Open Graph -->
-    <meta property="og:title" content="DanceFlow — Gestionale per Scuole di Danza" />
-    <meta property="og:description" content="Gestisci la tua scuola di danza con semplicità e professionalità." />
+    <meta property="og:title" content="Tropical Style Caribbean School — Gestionale Ufficiale" />
+    <meta property="og:description" content="Piattaforma gestionale ufficiale per allievi, docenti e direzione." />
     <meta property="og:type" content="website" />
+
+    <!-- Cache Busting -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
 
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -27,7 +37,45 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div style="position:fixed;inset:0;background:#09090e;display:flex;align-items:center;justify-content:center;flex-direction:column;font-family:system-ui,-apple-system,sans-serif;z-index:9999;">
+        <div style="background:#ffffff;border-radius:16px;padding:14px 22px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.5);margin-bottom:16px;">
+          <img src="/tropical_logo.png" alt="Tropical Style" style="height:48px;width:auto;display:block;" />
+        </div>
+        <div style="color:#ffffff;font-size:16px;font-weight:700;letter-spacing:-0.02em;">Tropical Style</div>
+        <div style="color:#a78bfa;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin-top:4px;">Caricamento in corso…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      (function() {
+        var BUILD_ID = 'ts-20260916-02';
+        var stored = localStorage.getItem('ts_app_version');
+
+        // Unregister all old service workers and purge caches
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function(registrations) {
+            for (var r of registrations) {
+              r.unregister();
+            }
+          });
+        }
+        if ('caches' in window) {
+          caches.keys().then(function(names) {
+            for (var name of names) {
+              caches.delete(name);
+            }
+          });
+        }
+
+        // If client was on an old version, reload once automatically to load fresh bundles
+        if (stored !== BUILD_ID) {
+          localStorage.setItem('ts_app_version', BUILD_ID);
+          if (stored) {
+            window.location.reload();
+          }
+        }
+      })();
+    </script>
   </body>
 </html>

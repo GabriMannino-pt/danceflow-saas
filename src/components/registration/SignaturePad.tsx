@@ -24,7 +24,7 @@ export const SignaturePad = forwardRef<SignaturePadRef, SignaturePadProps>(({ on
       if (sigCanvasRef.current?.isEmpty()) {
         return null;
       }
-      return sigCanvasRef.current?.getTrimmedCanvas().toDataURL('image/png') || null;
+      return sigCanvasRef.current?.getCanvas().toDataURL('image/png') || null;
     },
     isEmpty: () => {
       return sigCanvasRef.current?.isEmpty() ?? true;
@@ -65,12 +65,12 @@ export const SignaturePad = forwardRef<SignaturePadRef, SignaturePadProps>(({ on
 
   return (
     <div className="space-y-2">
-      <div className="relative border border-white/10 rounded-2xl bg-black/30 overflow-hidden h-[200px]">
+      <div className="relative border border-white/10 rounded-2xl bg-black/30 overflow-hidden h-[200px] touch-action-none">
         <SignatureCanvas
           ref={sigCanvasRef}
           penColor="#38bdf8" // sky blue for a sleek premium look
           canvasProps={{
-            className: 'w-full h-full cursor-crosshair',
+            className: 'w-full h-full cursor-crosshair touch-action-none',
           }}
           onBegin={onBegin}
           onEnd={onEnd}

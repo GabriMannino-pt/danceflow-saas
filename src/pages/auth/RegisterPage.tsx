@@ -77,11 +77,15 @@ export default function RegisterPage() {
       <div className='relative w-full max-w-md animate-fade-in-up py-8'>
         {/* Logo */}
         <div className='text-center mb-6'>
-          <div className='inline-flex items-center justify-center w-16 h-16 rounded-2xl btn-primary-gradient mb-3 animate-pulse-glow'>
-            <span className='text-3xl'>💃</span>
+          <div className='mb-3 inline-flex items-center justify-center px-5 py-3 rounded-2xl bg-white shadow-xl'>
+            <img
+              src='/tropical_logo.png'
+              alt='Tropical Style'
+              className='h-12 w-auto max-w-[200px] object-contain'
+            />
           </div>
-          <h1 className='text-2xl font-display font-bold gradient-text'>DanceFlow</h1>
-          <p className='text-white/50 text-xs mt-1'>Crea il tuo spazio per la scuola di danza</p>
+          <h1 className='text-2xl font-display font-bold text-white'>Tropical Style</h1>
+          <p className='text-brand-400 text-xs mt-0.5 font-semibold uppercase tracking-wider'>Caribbean School</p>
         </div>
 
         <Card>
@@ -123,7 +127,7 @@ export default function RegisterPage() {
               placeholder='direzione@scuola.it'
               icon={<Mail size={16} />}
               fullWidth
-              autoComplete='email'
+              autoComplete='username'
               error={errors.email?.message}
               {...register('email')}
             />
@@ -195,7 +199,7 @@ export default function RegisterPage() {
         </Card>
 
         <p className='text-center text-xs text-white/20 mt-4'>
-          DanceFlow v1.0 · © 2024 All rights reserved
+          Tropical Style Caribbean School · © 2026 All rights reserved
         </p>
       </div>
     </div>

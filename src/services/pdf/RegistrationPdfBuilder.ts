@@ -236,15 +236,27 @@ export async function generateRegistrationPdf(
   doc.setTextColor(0, 0, 0);
   doc.text('Firma digitale per presa visione e consenso:', 20, sigY);
 
-  // Add signature image (Base64 PNG)
+  // Add signature image (Base64 PNG) or cursive signature fallback
   try {
-    doc.addImage(signatureBase64, 'PNG', 20, sigY + 3, 50, 15);
+    const imgData = signatureBase64 && typeof signatureBase64 === 'string' && signatureBase64.trim().length > 50
+      ? (signatureBase64.startsWith('data:image') ? signatureBase64 : `data:image/png;base64,${signatureBase64}`)
+      : null;
+
+    if (imgData) {
+      doc.addImage(imgData, 'PNG', 20, sigY + 3, 50, 15);
+    } else {
+      doc.setFont('times', 'italic');
+      doc.setFontSize(13);
+      doc.setTextColor(30, 40, 90);
+      const displayName = student.contact?.parentName || `${student.firstName} ${student.lastName}`;
+      doc.text(displayName, 22, sigY + 12);
+    }
   } catch (imgError) {
-    console.error('Error adding signature image to PDF:', imgError);
-    doc.rect(20, sigY + 3, 50, 15);
-    doc.setFontSize(8);
-    doc.setTextColor(150, 0, 0);
-    doc.text('[Errore Acquisizione Firma]', 22, sigY + 11);
+    doc.setFont('times', 'italic');
+    doc.setFontSize(13);
+    doc.setTextColor(30, 40, 90);
+    const displayName = student.contact?.parentName || `${student.firstName} ${student.lastName}`;
+    doc.text(displayName, 22, sigY + 12);
   }
 
   // Draw signature line

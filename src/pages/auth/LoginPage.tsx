@@ -2,10 +2,9 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Link } from 'react-router-dom';
-import { Mail, Lock, Eye, EyeOff, LogIn } from 'lucide-react';
-import { loginWithEmail, loginWithGoogle } from '@/hooks/useAuth';
-import { Button, Input, Card } from '@/components/ui';
+import { Mail, Lock, Eye, EyeOff, LogIn, CheckCircle2 } from 'lucide-react';
+import { loginWithEmail, loginWithGoogle, sendResetEmail } from '@/hooks/useAuth';
+import { Button, Input, Card, Modal } from '@/components/ui';
 
 const loginSchema = z.object({
   email:    z.string().email('Email non valida'),
@@ -19,11 +18,51 @@ export default function LoginPage() {
   const [googleLoading, setGoogleLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetSuccess, setResetSuccess] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
+
   const {
     register,
     handleSubmit,
+    watch,
     formState: { errors, isSubmitting },
   } = useForm<LoginForm>({ resolver: zodResolver(loginSchema) });
+
+  const currentEmail = watch('email');
+
+  function openResetModal() {
+    setResetEmail(currentEmail || '');
+    setResetSuccess(false);
+    setResetError(null);
+    setResetModalOpen(true);
+  }
+
+  async function handleSendReset(e: React.FormEvent) {
+    e.preventDefault();
+    if (!resetEmail || !resetEmail.includes('@')) {
+      setResetError('Inserisci un indirizzo email valido');
+      return;
+    }
+    setResetLoading(true);
+    setResetError(null);
+    try {
+      await sendResetEmail(resetEmail.trim());
+      setResetSuccess(true);
+    } catch (err: unknown) {
+      console.error('[LoginPage] Reset error:', err);
+      const code = (err as { code?: string }).code;
+      if (code === 'auth/user-not-found') {
+        setResetError('Nessun account associato a questa email.');
+      } else {
+        setResetError('Impossibile inviare l\'email di ripristino. Riprova più tardi.');
+      }
+    } finally {
+      setResetLoading(false);
+    }
+  }
 
   async function onSubmit(data: LoginForm) {
     setAuthError(null);
@@ -72,11 +111,15 @@ export default function LoginPage() {
       <div className='relative w-full max-w-md animate-fade-in-up'>
         {/* Logo */}
         <div className='text-center mb-8'>
-          <div className='inline-flex items-center justify-center w-20 h-20 rounded-3xl btn-primary-gradient mb-4 animate-pulse-glow'>
-            <span className='text-4xl'>💃</span>
+          <div className='mb-4 inline-flex items-center justify-center px-6 py-4 rounded-3xl bg-white shadow-2xl'>
+            <img
+              src='/tropical_logo.png'
+              alt='Tropical Style Caribbean School'
+              className='h-16 w-auto max-w-[240px] object-contain'
+            />
           </div>
-          <h1 className='text-3xl font-display font-bold gradient-text'>DanceFlow</h1>
-          <p className='text-white/50 text-sm mt-1'>Gestionale per Scuole di Danza</p>
+          <h1 className='text-2xl font-display font-bold text-white'>Tropical Style</h1>
+          <p className='text-brand-400 text-xs mt-1 font-semibold uppercase tracking-wider'>Caribbean School · Portale Gestionale</p>
         </div>
 
         <Card>
@@ -98,7 +141,7 @@ export default function LoginPage() {
               placeholder='nome@scuola.it'
               icon={<Mail size={16} />}
               fullWidth
-              autoComplete='email'
+              autoComplete='username'
               error={errors.email?.message}
               {...register('email')}
             />
@@ -127,7 +170,8 @@ export default function LoginPage() {
               <div className='flex justify-end'>
                 <button
                   type='button'
-                  className='text-xs text-brand-400 hover:text-brand-300 transition-colors'
+                  onClick={openResetModal}
+                  className='text-xs text-brand-400 hover:text-brand-300 transition-colors cursor-pointer'
                 >
                   Password dimenticata?
                 </button>
@@ -146,12 +190,12 @@ export default function LoginPage() {
             </Button>
 
             <div className='text-center mt-4'>
-              <Link
-                to='/register'
-                className='text-xs text-brand-400 hover:text-brand-300 transition-colors font-medium hover:underline'
-              >
-                Non hai un account? Inizia la prova gratuita
-              </Link>
+              <p className='text-xs text-white/40'>
+                Sei un genitore o un allievo e non hai un account?{' '}
+                <span className='text-brand-400 font-medium block mt-0.5'>
+                  Scansiona il QR Code o richiedi il link di iscrizione alla segreteria
+                </span>
+              </p>
             </div>
           </form>
 
@@ -185,9 +229,74 @@ export default function LoginPage() {
         </Card>
 
         <p className='text-center text-xs text-white/20 mt-4'>
-          DanceFlow v1.0 · © 2024 All rights reserved
+          Tropical Style Caribbean School · © 2026 All rights reserved
         </p>
       </div>
+
+      {/* Password Reset Modal */}
+      <Modal
+        isOpen={resetModalOpen}
+        onClose={() => setResetModalOpen(false)}
+        title="Recupero Password"
+        description="Inserisci l'indirizzo email del tuo account per ricevere il link di ripristino."
+      >
+        {resetSuccess ? (
+          <div className="text-center py-4 space-y-3">
+            <div className="w-12 h-12 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
+              <CheckCircle2 size={24} />
+            </div>
+            <h4 className="text-sm font-semibold text-white">Email Inviata!</h4>
+            <p className="text-xs text-white/60 leading-relaxed max-w-sm mx-auto">
+              Abbiamo inviato un link di reimpostazione password a <strong className="text-white">{resetEmail}</strong>. Controlla anche la cartella spam.
+            </p>
+            <div className="pt-2">
+              <Button
+                variant="secondary"
+                fullWidth
+                onClick={() => setResetModalOpen(false)}
+              >
+                Chiudi
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSendReset} className="space-y-4 pt-2">
+            {resetError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-xs text-red-400">
+                {resetError}
+              </div>
+            )}
+            <Input
+              label="Indirizzo Email"
+              type="email"
+              placeholder="es. direzione@tropicalstyle.it"
+              icon={<Mail size={16} />}
+              fullWidth
+              value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              required
+              autoFocus
+            />
+            <div className="flex gap-2 justify-end pt-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setResetModalOpen(false)}
+                disabled={resetLoading}
+              >
+                Annulla
+              </Button>
+              <Button
+                type="submit"
+                loading={resetLoading}
+                className="btn-primary-gradient"
+              >
+                Invia Link di Ripristino
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
     </div>
   );
 }

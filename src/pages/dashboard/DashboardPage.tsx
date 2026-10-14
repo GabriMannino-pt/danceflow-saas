@@ -25,6 +25,10 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend
 } from 'recharts';
+import TeacherDashboardPage from '@/pages/teacher/TeacherDashboardPage';
+import { useStudents } from '@/hooks/useStudents';
+import { useCourses } from '@/hooks/useCourses';
+import { usePayments } from '@/hooks/usePayments';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -55,6 +59,10 @@ interface DashboardData {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  useStudents();
+  useCourses();
+  usePayments();
+
   const navigate = useNavigate();
   const user = useAuthStore((s) => s.user);
   const schoolId = user?.schoolId;
@@ -279,6 +287,10 @@ export default function DashboardPage() {
   }, [schoolId]);
 
   // ─── Render ───────────────────────────────────────────────────────────────
+  if (user?.role === 'teacher') {
+    return <TeacherDashboardPage />;
+  }
+
   return (
     <ErrorBoundary>
       <div className='page-enter space-y-6'>
@@ -310,7 +322,7 @@ export default function DashboardPage() {
               icon={<Users size={18} />}
               label='Allievi Attivi'
               value={data.activeStudentsCount}
-              sub={`${students.filter((s) => !s.isDeleted).length} totali`}
+              sub={`su ${students.filter((s) => !s.isDeleted).length} registrati`}
               color='brand'
             />
             <KPICard

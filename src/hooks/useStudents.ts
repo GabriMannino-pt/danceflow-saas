@@ -5,6 +5,7 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  deleteDoc,
   query,
   getDoc,
 } from 'firebase/firestore';
@@ -80,6 +81,24 @@ export function useStudents() {
       };
 
       await setDoc(studentRef, newStudent);
+
+      // Sincronizzazione indice Codice Fiscale
+      if (newStudent.fiscalCode) {
+        const cleanCF = newStudent.fiscalCode.trim().toUpperCase();
+        try {
+          const cfRef = doc(db, 'schools', schoolId, 'fiscalCodesIndex', cleanCF);
+          await setDoc(cfRef, {
+            studentId: newStudent.id,
+            firstName: newStudent.firstName,
+            lastName: newStudent.lastName,
+            status: 'active',
+            updatedAt: nowTimestamp(),
+          }, { merge: true });
+        } catch (cfErr) {
+          console.warn('[useStudents] Error indexing CF on create:', cfErr);
+        }
+      }
+
       storeAddStudent(newStudent);
       toast.success('Allievo registrato con successo!');
       return newStudent;
@@ -104,6 +123,32 @@ export function useStudents() {
       };
 
       await updateDoc(ref, removeUndefined(finalUpdates));
+
+      // Sincronizzazione variazione Codice Fiscale
+      if (updates.fiscalCode !== undefined) {
+        const cleanNewCF = updates.fiscalCode?.trim().toUpperCase();
+        const currentStudent = students.find((s) => s.id === studentId);
+        const oldCF = currentStudent?.fiscalCode?.trim().toUpperCase();
+
+        try {
+          if (oldCF && oldCF !== cleanNewCF) {
+            await deleteDoc(doc(db, 'schools', schoolId, 'fiscalCodesIndex', oldCF));
+          }
+          if (cleanNewCF) {
+            const cfRef = doc(db, 'schools', schoolId, 'fiscalCodesIndex', cleanNewCF);
+            await setDoc(cfRef, {
+              studentId,
+              firstName: updates.firstName || currentStudent?.firstName || '',
+              lastName: updates.lastName || currentStudent?.lastName || '',
+              status: 'active',
+              updatedAt: nowTimestamp(),
+            }, { merge: true });
+          }
+        } catch (cfErr) {
+          console.warn('[useStudents] Error updating CF index on edit:', cfErr);
+        }
+      }
+
       storeUpdateStudent(studentId, finalUpdates);
       toast.success('Dati allievo aggiornati!');
     } catch (err) {
@@ -128,6 +173,18 @@ export function useStudents() {
       };
 
       await updateDoc(ref, removeUndefined(updates));
+
+      // Rimozione Codice Fiscale dall'indice
+      const currentStudent = students.find((s) => s.id === studentId);
+      if (currentStudent?.fiscalCode) {
+        try {
+          const oldCF = currentStudent.fiscalCode.trim().toUpperCase();
+          await deleteDoc(doc(db, 'schools', schoolId, 'fiscalCodesIndex', oldCF));
+        } catch (cfErr) {
+          console.warn('[useStudents] Error deleting CF index on delete:', cfErr);
+        }
+      }
+
       storeRemoveStudent(studentId);
       toast.success('Allievo eliminato con successo.');
     } catch (err) {
@@ -185,8 +242,8 @@ export function useStudents() {
       const newMsg: Message = {
         id: msgRef.id,
         schoolId,
-        subject: `DanceFlow - Sollecitazione Documenti: ${student.firstName} ${student.lastName}`,
-        body: `Gentile ${parentName},\n\nTi ricordiamo che per completare l'iscrizione a regola d'arte presso la nostra scuola di danza, mancano ancora i seguenti documenti:\n\n${missingDocs.map((d) => `- ${d}`).join('\n')}\n\nTi invitiamo ad accedere al tuo portale su DanceFlow per effettuare comodamente l'upload digitale in pochi passaggi.\n\nCordiali saluti,\nLa Direzione`,
+        subject: `Tropical Style - Sollecitazione Documenti: ${student.firstName} ${student.lastName}`,
+        body: `Gentile ${parentName},\n\nTi ricordiamo che per completare l'iscrizione a regola d'arte presso la nostra scuola di danza, mancano ancora i seguenti documenti:\n\n${missingDocs.map((d) => `- ${d}`).join('\n')}\n\nTi invitiamo ad accedere al tuo portale allievi per effettuare comodamente l'upload digitale in pochi passaggi.\n\nCordiali saluti,\nLa Direzione Tropical Style`,
         authorId: user.uid,
         recipientType: 'students',
         recipientIds: [student.id],
@@ -213,7 +270,8 @@ export function useStudents() {
     docType: 'identity' | 'medical' | 'consent' | 'insurance' | 'other',
     fileName: string,
     notes?: string,
-    expiryDate?: Date
+    expiryDate?: Date,
+    isValidated: boolean = false
   ) {
     if (!schoolId) throw new Error('Not authenticated');
     setLoading(true);
@@ -248,7 +306,7 @@ export function useStudents() {
         const medicalExpiry = expiryDate ? toTimestamp(expiryDate) : undefined;
         updates.medicalInfo = {
           ...student.medicalInfo,
-          medicalClearance: true,
+          medicalClearance: isValidated,
           medicalClearanceExpiry: medicalExpiry,
         };
       }

@@ -2,29 +2,35 @@
 node_modules/
 functions/node_modules/
 
-# Build output
+# Build output & TypeScript cache
 dist/
 dist-ssr/
+dev-dist/
+*.tsbuildinfo
 
-# Environment variables — NEVER commit
+# Environment variables & Secret Keys — NEVER commit
 .env
-.env.local
-.env.*.local
+.env.*
+*.env
+serviceAccountKey.json
+*.pem
+*.key
 
 # Firebase
 .firebase/
 
-# Editor
+# Editor & IDE
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+.gemini/
 
-# OS
+# Operating System files
 .DS_Store
 Thumbs.db
 
@@ -32,6 +38,30 @@ Thumbs.db
 *.log
 npm-debug.log*
 
-# PWA
-dev-dist/
+# Sensitive Commercial & Internal Documents (PDF, Office, Spreadsheets)
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.csv
+Preventivo*
+Manuale*
+*Tropical_Style*
+piano_sviluppo*
+PROJECT_CONTEXT.md
 
+# Internal dev scratch, memory, audio & scripts
+_internal_memory/
+_feedback_audio/
+scratch/
+scripts/
+
+# Screenshots & Local Test Assets
+screenshots/
+*preview*.png
+page1_preview.png
+page2_preview.png
+anteprima_registro_segreteria.html
+logo_tropical_extracted.png
+tropical_logo_clean.png

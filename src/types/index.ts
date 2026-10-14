@@ -44,6 +44,17 @@ export interface School extends TimestampFields, SoftDelete {
   customPrivacyUrl?: string;
   customTermsUrl?: string;
   suspended?: boolean;
+  whatsappConfig?: {
+    provider: 'twilio' | 'meta';
+    credentials: {
+      accountSid?: string;
+      authToken?: string;
+      phoneNumber?: string;
+      accessToken?: string;
+      phoneNumberId?: string;
+      businessAccountId?: string;
+    };
+  };
 }
 
 export interface Address {
@@ -78,6 +89,7 @@ export interface SchoolSettings {
   allowParentPortal: boolean;
   notificationsEnabled: boolean;
   whatsappEnabled: boolean;
+  whatsappChannelUrl?: string; // Link al Canale WhatsApp o Gruppo Avvisi della scuola
   registrationQR?: {
     enabled: boolean;
     token: string;
@@ -109,13 +121,12 @@ export interface Student extends TimestampFields, SoftDelete {
   documents: StudentDocument[];
   notes?: string;
   isActive: boolean;
+  status?: 'active' | 'inactive' | 'toRenew';
   parentId?: string; // uid of parent user
   costumes?: CostumeMeasurements;
   customMonthlyFee?: number | null;
   customRegistrationFee?: number | null;
   customShowFee?: number | null;
-  flatRateEnabled?: boolean;
-  flatRateAmount?: number | null;
   signatureMetadata?: {
     ipAddress: string;
     timestamp: any;
@@ -127,6 +138,11 @@ export interface Student extends TimestampFields, SoftDelete {
     };
   };
   sha256Hash?: string | null;
+  enrollmentHistory?: Array<{
+    academicYear: string;
+    courses: string[];
+    totalPaid: number;
+  }>;
 }
 
 
@@ -186,6 +202,7 @@ export interface Course extends TimestampFields, SoftDelete {
   fee: CourseFee;
   colorHex: string; // display color
   isActive: boolean;
+  archived?: boolean;
   academicYear: string; // e.g. "2024-2025"
 }
 
@@ -249,6 +266,7 @@ export interface Payment extends TimestampFields {
   id: string;
   schoolId: string;
   studentId: string;
+  parentId?: string;
   courseId?: string;
   description: string;
   amount: number; // Kept for compatibility (equals totalAmount)
@@ -311,6 +329,7 @@ export interface CostumeOrder extends TimestampFields {
   items: CostumeItem[];
   status: 'draft' | 'ordered' | 'received' | 'distributed';
   totalCost?: number;
+  itemCategory?: string;
   notes?: string;
   orderPdfURL?: string;
 }
@@ -323,6 +342,14 @@ export interface CostumeItem {
   quantity: number;
   unitCost?: number;
   color?: string;
+  fixedAmount: number;
+  fittingNotes: string;
+  paymentsLog: Array<{
+    amount: number;
+    date: Timestamp;
+    receiptIssued: boolean;
+    receiptNumber?: string;
+  }>;
 }
 
 // ─── Communication ────────────────────────────────────────────────────────────

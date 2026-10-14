@@ -16,6 +16,7 @@ import { paymentConverter, COLLECTIONS, nowTimestamp, toTimestamp, removeUndefin
 import { useSchoolStore } from '@/stores/schoolStore';
 import { useAuthStore } from '@/stores/authStore';
 import type { Payment, PaymentMethod } from '@/types';
+import { getNextReceiptNumber } from '@/services/receiptService';
 import toast from 'react-hot-toast';
 
 export function usePayments() {
@@ -32,8 +33,9 @@ export function usePayments() {
 
   // ─── Real-time Subscription ────────────────────────────────────────────────
   useEffect(() => {
-    if (!schoolId) {
+    if (!schoolId || user?.role === 'teacher') {
       setPayments([]);
+      setLoadingPayments(false);
       return;
     }
 
@@ -67,10 +69,14 @@ export function usePayments() {
     try {
       const paymentRef = doc(collection(db, COLLECTIONS.payments(schoolId))).withConverter(paymentConverter);
       
+      const student = students.find((s) => s.id === data.studentId);
+      const parentId = data.parentId || student?.parentId;
+      
       const newPayment: Payment = {
         ...data,
         id: paymentRef.id,
         schoolId,
+        ...(parentId ? { parentId } : {}),
         totalAmount: data.amount,
         paidAmount: 0,
         remainingAmount: data.amount,
@@ -134,15 +140,14 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
-      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && isFlatRate)
-        ? student.flatRateAmount!
-        : (isMonthly && hasCustomFee)
+      const totalAmount = p.totalAmount ?? p.amount ?? (
+        isMonthly && hasCustomFee
           ? student.customMonthlyFee!
           : (isMonthly && course?.fee?.monthly)
             ? course.fee.monthly
-            : (p.totalAmount ?? p.amount);
+            : 0
+      );
 
       const prevPaid = p.paidAmount ?? 0;
       const newPaid = prevPaid + installmentAmount;
@@ -155,18 +160,21 @@ export function usePayments() {
         status = 'deposit_paid';
       }
 
+      let receiptNumber = p.receiptNumber;
+      if (emitReceipt && !receiptNumber) {
+        receiptNumber = await getNextReceiptNumber(schoolId);
+      }
+
       const newInstallment = {
         amount: installmentAmount,
         date: Timestamp.fromDate(date),
         method,
         receiptEmitted: emitReceipt,
-        receiptUrl: emitReceipt ? `generated://receipt/${new Date().getFullYear()}-${new Date().getMonth() + 1}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}` : undefined,
+        receiptUrl: emitReceipt && receiptNumber ? `generated://receipt/${receiptNumber}` : undefined,
         notes: notes || undefined
       };
 
       const history = p.payments ? [...p.payments, newInstallment] : [newInstallment];
-      
-      const receiptNumber = p.receiptNumber || (emitReceipt ? `${new Date().getFullYear()}-${new Date().getMonth() + 1}-${Math.floor(Math.random() * 10000).toString().padStart(4, '0')}` : undefined);
 
       const updates: Partial<Payment> = {
         totalAmount,
@@ -229,43 +237,6 @@ export function usePayments() {
       let count = 0;
 
       for (const student of enrolledActiveStudents) {
-        if (student.flatRateEnabled) {
-          // Check if any monthly payment already exists for this student for this month/year
-          const existingFlat = payments.find(
-            (p) => p.studentId === student.id && 
-                   p.month === month && 
-                   p.year === year &&
-                   p.type === 'monthly'
-          );
-
-          if (!existingFlat) {
-            const feeVal = student.flatRateAmount ?? 0;
-            const newRef = doc(paymentsCol);
-            const newPayment: Payment = {
-              id: newRef.id,
-              schoolId,
-              studentId: student.id,
-              courseId: courseId, // associated with the course triggering the batch
-              description: `Retta Mensile Forfettaria - ${month}/${year}`,
-              amount: feeVal,
-              currency: 'EUR',
-              status: 'pending',
-              dueDate: toTimestamp(dueDate),
-              type: 'monthly',
-              month,
-              year,
-              totalAmount: feeVal,
-              paidAmount: 0,
-              remainingAmount: feeVal,
-              createdAt: nowTimestamp(),
-              updatedAt: nowTimestamp(),
-            };
-            batch.set(newRef, newPayment);
-            count++;
-          }
-          continue; // skip single course calculations
-        }
-
         // Check if payment already exists for this month/year/course/student
         const existing = payments.find(
           (p) => p.studentId === student.id && 
@@ -285,6 +256,7 @@ export function usePayments() {
             id: newRef.id,
             schoolId,
             studentId: student.id,
+            ...(student.parentId ? { parentId: student.parentId } : {}),
             courseId: course.id,
             description: `Retta ${course.name} - ${month}/${year}`,
             amount: feeVal,
@@ -350,15 +322,12 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
-      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && isFlatRate)
-        ? student.flatRateAmount!
-        : (isMonthly && hasCustomFee)
-          ? student.customMonthlyFee!
-          : (isMonthly && course?.fee?.monthly)
-            ? course.fee.monthly
-            : (p.totalAmount ?? p.amount);
+      const totalAmount = (isMonthly && hasCustomFee)
+        ? student.customMonthlyFee!
+        : (isMonthly && course?.fee?.monthly)
+          ? course.fee.monthly
+          : (p.totalAmount ?? p.amount);
 
       const newPaid = history.reduce((sum, inst) => sum + inst.amount, 0);
       const remainingAmount = Math.max(0, totalAmount - newPaid);
@@ -413,15 +382,12 @@ export function usePayments() {
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
-      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const totalAmount = (isMonthly && isFlatRate)
-        ? student.flatRateAmount!
-        : (isMonthly && hasCustomFee)
-          ? student.customMonthlyFee!
-          : (isMonthly && course?.fee?.monthly)
-            ? course.fee.monthly
-            : (p.totalAmount ?? p.amount);
+      const totalAmount = (isMonthly && hasCustomFee)
+        ? student.customMonthlyFee!
+        : (isMonthly && course?.fee?.monthly)
+          ? course.fee.monthly
+          : (p.totalAmount ?? p.amount);
 
       const newPaid = history.reduce((sum, inst) => sum + inst.amount, 0);
       const remainingAmount = Math.max(0, totalAmount - newPaid);
@@ -475,10 +441,7 @@ export function usePayments() {
         return;
       }
 
-      const year = new Date().getFullYear();
-      const month = new Date().getMonth() + 1;
-      const rand = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-      const receiptNumber = `${year}-${month}-${rand}`;
+      const receiptNumber = p.receiptNumber || (await getNextReceiptNumber(schoolId));
       const receiptUrl = `generated://receipt/${receiptNumber}`;
 
       history[index] = {
@@ -541,11 +504,99 @@ export function usePayments() {
     }
   }
 
+  // ─── Direct Instant Payment (Registration / Monthly with dynamic custom amount) ───
+  async function registerDirectPayment(data: {
+    studentId: string;
+    courseId?: string;
+    type: 'monthly' | 'registration';
+    month?: number;
+    year?: number;
+    description: string;
+    amount: number;
+    method: PaymentMethod;
+    date: Date;
+    notes?: string;
+    emitReceipt: boolean;
+  }) {
+    if (!schoolId) throw new Error('Not authenticated to a school');
+    try {
+      const student = students.find((s) => s.id === data.studentId);
+      const parentId = student?.parentId;
+
+      let receiptNumber: string | undefined = undefined;
+      if (data.emitReceipt) {
+        receiptNumber = await getNextReceiptNumber(schoolId);
+      }
+
+      const paymentRef = doc(collection(db, COLLECTIONS.payments(schoolId))).withConverter(paymentConverter);
+      const timestampDate = Timestamp.fromDate(data.date);
+
+      const installment = {
+        amount: data.amount,
+        date: timestampDate,
+        method: data.method,
+        receiptEmitted: data.emitReceipt,
+        receiptUrl: receiptNumber ? `generated://receipt/${receiptNumber}` : undefined,
+        notes: data.notes || undefined,
+      };
+
+      const newPayment: Payment = {
+        id: paymentRef.id,
+        schoolId,
+        studentId: data.studentId,
+        ...(parentId ? { parentId } : {}),
+        courseId: data.courseId || undefined,
+        type: data.type,
+        month: data.month,
+        year: data.year || new Date().getFullYear(),
+        description: data.description.trim(),
+        amount: data.amount,
+        totalAmount: data.amount,
+        paidAmount: data.amount,
+        remainingAmount: 0,
+        currency: 'EUR',
+        status: 'paid',
+        paidAt: timestampDate,
+        dueDate: timestampDate,
+        method: data.method,
+        receiptNumber,
+        notes: data.notes?.trim() || undefined,
+        payments: [installment],
+        createdAt: nowTimestamp(),
+        updatedAt: nowTimestamp(),
+      };
+
+      await setDoc(paymentRef, newPayment);
+
+      // If registration fee, update student
+      if (data.type === 'registration') {
+        const studentRef = doc(db, COLLECTIONS.students(schoolId), data.studentId);
+        await updateDoc(studentRef, {
+          registrationFeePaid: true,
+          registrationFeePaidAt: timestampDate,
+          updatedAt: nowTimestamp(),
+        });
+      }
+
+      toast.success(
+        receiptNumber 
+          ? `Pagamento di €${data.amount.toFixed(2)} registrato! (Ricevuta n. ${receiptNumber})`
+          : `Pagamento di €${data.amount.toFixed(2)} registrato con successo!`
+      );
+      return { payment: newPayment, installment };
+    } catch (err: any) {
+      console.error('[usePayments] registerDirectPayment error:', err);
+      toast.error('Errore durante la registrazione del pagamento.');
+      throw err;
+    }
+  }
+
   return {
     payments,
     createPayment,
     markAsPaid,
     registerInstallment,
+    registerDirectPayment,
     generateMonthlyFees,
     updateInstallment,
     deleteInstallment,

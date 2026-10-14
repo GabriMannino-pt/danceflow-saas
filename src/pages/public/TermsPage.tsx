@@ -9,7 +9,7 @@ export default function TermsPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const schoolId = searchParams.get('schoolId');
-  const [schoolName, setSchoolName] = useState('DanceFlow');
+  const [schoolName, setSchoolName] = useState('Tropical Style');
 
   useEffect(() => {
     if (!schoolId) return;
@@ -18,7 +18,7 @@ export default function TermsPage() {
         const docRef = doc(db, 'schools', schoolId!);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
-          setSchoolName(docSnap.data().name || 'DanceFlow');
+          setSchoolName(docSnap.data().name || 'Tropical Style');
         }
       } catch (err) {
         console.error('Error fetching school name:', err);

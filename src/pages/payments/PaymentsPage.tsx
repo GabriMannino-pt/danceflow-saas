@@ -2,12 +2,21 @@ import { useState, useMemo, useEffect } from 'react';
 import { usePayments } from '@/hooks/usePayments';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { writeBatch, doc, Timestamp } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { COLLECTIONS, paymentConverter, nowTimestamp } from '@/lib/converters';
 import { Card, Badge, Button, Input, Select, Modal, ModalFooter, EmptyState } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { PaymentForm } from '@/components/payments/PaymentForm';
+import { QuickPaymentModal } from '@/components/payments/QuickPaymentModal';
 import { generateReceiptPDF, generateAnnualPaymentsReportPDF, generateFilteredPaymentsPDF } from '@/lib/pdf';
 import { exportToCSV } from '@/lib/excel';
 import type { Payment, PaymentMethod } from '@/types';
+
+const ITALIAN_MONTHS = [
+  'Gennaio', 'Febbraio', 'Marzo', 'Aprile', 'Maggio', 'Giugno',
+  'Luglio', 'Agosto', 'Settembre', 'Ottobre', 'Novembre', 'Dicembre'
+];
 import {
   CreditCard,
   Search,
@@ -20,8 +29,14 @@ import {
   BellRing,
   Edit,
   Trash2,
-  XCircle
+  XCircle,
+  MessageCircle
 } from 'lucide-react';
+import { 
+  openWhatsAppChat, 
+  getStudentWhatsAppPhone, 
+  buildPaymentReminderWhatsAppMessage 
+} from '@/lib/whatsapp';
 import { format, differenceInDays } from 'date-fns';
 import toast from 'react-hot-toast';
 
@@ -42,7 +57,22 @@ export default function PaymentsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [courseFilter, setCourseFilter] = useState('all');
-  const [monthFilter, setMonthFilter] = useState(new Date().getMonth() + 1);
+  const [monthFilter, setMonthFilter] = useState(0); // 0 = Tutti i mesi
+
+  // Quick Payment Modal State
+  const [isQuickPaymentOpen, setIsQuickPaymentOpen] = useState(false);
+  const [quickStudentId, setQuickStudentId] = useState<string | undefined>(undefined);
+
+  // Pagination & Bulk Selection States
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [selectedPaymentIds, setSelectedPaymentIds] = useState<string[]>([]);
+
+  // Reset page & selection on filter change
+  useEffect(() => {
+    setCurrentPage(1);
+    setSelectedPaymentIds([]);
+  }, [searchQuery, statusFilter, courseFilter, monthFilter, activeTab]);
 
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false);
@@ -97,27 +127,34 @@ export default function PaymentsPage() {
   const [genDueDate, setGenDueDate] = useState(new Date().toISOString().split('T')[0]);
 
   const resolvedPayments = useMemo(() => {
-    return payments.map((p) => {
-      const student = students.find((s) => s.id === p.studentId);
-      const course = courses.find((c) => c.id === p.courseId);
+    return payments
+      .filter((p) => {
+        const student = students.find((s) => s.id === p.studentId);
+        return !student || !student.isDeleted;
+      })
+      .map((p) => {
+        const student = students.find((s) => s.id === p.studentId);
+        const course = courses.find((c) => c.id === p.courseId);
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
-      const isFlatRate = student && student.flatRateEnabled && student.flatRateAmount !== undefined && student.flatRateAmount !== null;
       
-      const total = (isMonthly && isFlatRate)
-        ? student.flatRateAmount!
-        : (isMonthly && hasCustomFee)
-          ? student.customMonthlyFee!
-          : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
-            ? student.customRegistrationFee
-            : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
-              ? student.customShowFee
-              : (isMonthly && course?.fee?.monthly)
-                ? course.fee.monthly
-                : (p.totalAmount ?? p.amount);
+      // Preserve explicit custom totalAmount or paid amount if already recorded
+      const total = (p.totalAmount !== undefined && p.totalAmount !== null)
+        ? p.totalAmount
+        : (p.status === 'paid' && p.amount)
+          ? p.amount
+          : (isMonthly && hasCustomFee)
+            ? student.customMonthlyFee!
+            : (p.type === 'registration' && student && student.customRegistrationFee !== undefined && student.customRegistrationFee !== null)
+              ? student.customRegistrationFee
+              : (p.type === 'event' && student && student.customShowFee !== undefined && student.customShowFee !== null)
+                ? student.customShowFee
+                : (isMonthly && course?.fee?.monthly)
+                  ? course.fee.monthly
+                  : (p.amount ?? 0);
       
-      const paid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
+      const paid = p.paidAmount ?? (p.status === 'paid' ? total : 0);
       const remaining = Math.max(0, total - paid);
       
       let status = p.status;
@@ -175,16 +212,41 @@ export default function PaymentsPage() {
       const student = students.find(s => s.id === p.studentId);
       const studentName = student ? `${student.firstName} ${student.lastName}`.toLowerCase() : '';
       
-      const matchesSearch = studentName.includes(searchQuery.toLowerCase()) || 
+      const isSearching = searchQuery.trim().length > 0;
+      const matchesSearch = !isSearching || 
+                            studentName.includes(searchQuery.toLowerCase()) || 
                             p.description.toLowerCase().includes(searchQuery.toLowerCase());
       
       const matchesStatus = statusFilter === 'all' ? true : p.status === statusFilter;
       const matchesCourse = courseFilter === 'all' ? true : p.courseId === courseFilter;
-      const matchesMonth = monthFilter === 0 ? true : p.month === monthFilter;
+      // When searching, search across all months so the search is not obstructed by the month filter
+      const matchesMonth = (isSearching || monthFilter === 0) ? true : p.month === monthFilter;
 
       return matchesSearch && matchesStatus && matchesCourse && matchesMonth;
     });
   }, [resolvedPayments, searchQuery, statusFilter, courseFilter, monthFilter, students]);
+
+  // Quick student match when searching by name
+  const matchingStudents = useMemo(() => {
+    if (!searchQuery.trim() || searchQuery.trim().length < 2) return [];
+    const q = searchQuery.toLowerCase().trim();
+    return students.filter(s => 
+      s.isActive && !s.isDeleted && (
+        `${s.firstName} ${s.lastName}`.toLowerCase().includes(q) ||
+        `${s.lastName} ${s.firstName}`.toLowerCase().includes(q) ||
+        (s.fiscalCode && s.fiscalCode.toLowerCase().includes(q))
+      )
+    ).slice(0, 3);
+  }, [searchQuery, students]);
+
+  const paginatedPayments = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    return filteredPayments.slice(startIndex, startIndex + pageSize);
+  }, [filteredPayments, currentPage, pageSize]);
+
+  const totalPages = useMemo(() => {
+    return Math.ceil(filteredPayments.length / pageSize) || 1;
+  }, [filteredPayments.length, pageSize]);
 
   const overdueList = useMemo(() => {
     const map = new Map<string, { studentName: string; totalAmount: number; daysLate: number; paymentIds: string[] }>();
@@ -246,6 +308,89 @@ export default function PaymentsPage() {
       console.error(err);
     }
   }
+
+  const handleSendWhatsAppPayment = (payment: Payment, student?: any) => {
+    if (!student) {
+      toast.error('Allievo non associato a questo pagamento');
+      return;
+    }
+    const phone = getStudentWhatsAppPhone(student);
+    if (!phone) {
+      toast.error(`Nessun recapito telefonico trovato per ${student.firstName} ${student.lastName}`);
+      return;
+    }
+    const amountDue = payment.remainingAmount ?? payment.amount;
+    const monthOrDesc = payment.description || (payment.month ? `Mese ${payment.month}` : 'quota');
+    const message = buildPaymentReminderWhatsAppMessage({
+      parentName: student.contact?.parentName,
+      studentName: `${student.firstName} ${student.lastName}`,
+      monthOrDescription: monthOrDesc,
+      amountDue,
+      schoolName: activeSchool?.name || 'Tropical Style Caribbean School',
+    });
+    openWhatsAppChat(phone, message);
+    toast.success(`Apertura WhatsApp per ${student.firstName}...`);
+  };
+
+  const handleBulkReminder = () => {
+    if (selectedPaymentIds.length === 0) return;
+    const selectedPayList = resolvedPayments.filter((p) => selectedPaymentIds.includes(p.id));
+    const uniqueStudentNames = Array.from(
+      new Set(
+        selectedPayList.map((p) => {
+          const student = students.find((s) => s.id === p.studentId);
+          return student ? `${student.firstName} ${student.lastName}` : 'Allievo sconosciuto';
+        })
+      )
+    );
+    toast.success(
+      `Inviato sollecito massivo a ${uniqueStudentNames.length} allievi (${selectedPaymentIds.length} quote in attesa/scadute).`
+    );
+    setSelectedPaymentIds([]);
+  };
+
+  const handleBulkIncassa = async () => {
+    if (selectedPaymentIds.length === 0 || !activeSchool) return;
+    if (!window.confirm(`Sei sicuro di voler segnare come saldati ${selectedPaymentIds.length} pagamenti?`)) return;
+
+    try {
+      const batch = writeBatch(db);
+      const selectedPayList = resolvedPayments.filter((p) => selectedPaymentIds.includes(p.id));
+      
+      selectedPayList.forEach((p) => {
+        const ref = doc(db, COLLECTIONS.payments(activeSchool.id), p.id).withConverter(paymentConverter);
+        const totalAmount = p.totalAmount ?? p.amount;
+        const unpaid = p.remainingAmount ?? (p.status === 'paid' ? 0 : totalAmount);
+
+        if (unpaid > 0) {
+          const newInstallment = {
+            amount: unpaid,
+            date: Timestamp.fromDate(new Date()),
+            method: 'cash' as PaymentMethod,
+            notes: 'Pagamento registrato via azione di massa',
+          };
+          const history = p.payments ? [...p.payments, newInstallment] : [newInstallment];
+
+          batch.update(ref, {
+            paidAmount: totalAmount,
+            remainingAmount: 0,
+            status: 'paid',
+            payments: history,
+            paidAt: nowTimestamp(),
+            method: 'cash',
+            updatedAt: nowTimestamp(),
+          });
+        }
+      });
+
+      await batch.commit();
+      toast.success(`${selectedPayList.length} pagamenti saldati con successo!`);
+      setSelectedPaymentIds([]);
+    } catch (err: any) {
+      console.error('[PaymentsPage] Bulk update error:', err);
+      toast.error(err.message || "Errore durante l'aggiornamento dei pagamenti.");
+    }
+  };
 
   const handleGenerateFees = async () => {
     if (!genCourseId) {
@@ -458,7 +603,7 @@ export default function PaymentsPage() {
           title='Pagamenti e Rette'
           subtitle='Gestisci le rette mensili, incassi manuali e morosità.'
           actions={
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <Button
                 variant="outline"
                 onClick={() => setIsExportModalOpen(true)}
@@ -474,10 +619,22 @@ export default function PaymentsPage() {
                 Genera Quote
               </Button>
               <Button
+                variant="outline"
                 onClick={() => setIsFormOpen(true)}
-                icon={<Plus size={18} />}
+                icon={<Plus size={16} />}
+                title="Crea un addebito programmato con scadenza futura"
               >
                 Nuovo Addebito
+              </Button>
+              <Button
+                onClick={() => {
+                  setQuickStudentId(undefined);
+                  setIsQuickPaymentOpen(true);
+                }}
+                icon={<CheckCircle size={18} />}
+                className="bg-brand-500 hover:bg-brand-600 text-white font-semibold shadow-lg shadow-brand-500/25"
+              >
+                Registra Pagamento
               </Button>
             </div>
           }
@@ -560,8 +717,11 @@ export default function PaymentsPage() {
                 />
                 <Select
                   options={[
-                    { value: '0', label: 'Tutti i mesi' },
-                    ...Array.from({ length: 12 }).map((_, i) => ({ value: String(i + 1), label: `Mese ${i + 1}` }))
+                    { value: '0', label: 'Tutti i mesi (Anno intero)' },
+                    ...ITALIAN_MONTHS.map((m, i) => ({
+                      value: String(i + 1),
+                      label: `${m} ${i + 1 === (new Date().getMonth() + 1) ? '(Corrente)' : ''}`
+                    }))
                   ]}
                   value={String(monthFilter)}
                   onChange={(e) => setMonthFilter(Number(e.target.value))}
@@ -588,11 +748,104 @@ export default function PaymentsPage() {
               </div>
             </Card>
 
+            {/* Quick Action when searching an allievo */}
+            {matchingStudents.length > 0 && (
+              <div className="bg-brand-500/10 border border-brand-500/30 rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 animate-fade-in-up">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-brand-500/20 text-brand-300 flex items-center justify-center shrink-0">
+                    <Search size={20} />
+                  </div>
+                  <div>
+                    <p className="text-xs text-brand-300 font-semibold uppercase tracking-wider">Allievo trovato per la ricerca</p>
+                    <div className="flex flex-wrap items-center gap-2 mt-1">
+                      {matchingStudents.map((s) => (
+                        <span key={s.id} className="text-sm font-bold text-white bg-white/10 px-3 py-1 rounded-lg">
+                          {s.firstName} {s.lastName}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                  {matchingStudents.map((s) => (
+                    <Button
+                      key={s.id}
+                      size="sm"
+                      onClick={() => {
+                        setQuickStudentId(s.id);
+                        setIsQuickPaymentOpen(true);
+                      }}
+                      icon={<CheckCircle size={16} />}
+                      className="bg-brand-500 hover:bg-brand-600 text-white font-semibold w-full md:w-auto shadow-md"
+                    >
+                      Registra Pagamento per {s.firstName}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {selectedPaymentIds.length > 0 && (
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 bg-brand-500/10 border border-brand-500/30 rounded-2xl animate-fade-in-up">
+                <div className="flex items-center gap-3">
+                  <span className="relative flex h-3.5 w-3.5">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-brand-500"></span>
+                  </span>
+                  <span className="text-sm font-semibold text-brand-300">
+                    {selectedPaymentIds.length} pagamenti selezionati
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-brand-500/30 text-brand-300 hover:bg-brand-500/20 w-full sm:w-auto"
+                    onClick={handleBulkReminder}
+                    icon={<BellRing size={14} />}
+                  >
+                    Invia Sollecito Massivo
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleBulkIncassa}
+                    icon={<CheckCircle size={14} />}
+                    className="w-full sm:w-auto"
+                  >
+                    Incassa Selezionati
+                  </Button>
+                </div>
+              </div>
+            )}
+
             <Card className='p-0 overflow-hidden border border-white/5'>
               <div className="overflow-x-auto">
                 <table className='w-full text-left border-collapse min-w-[800px]'>
                   <thead>
                     <tr className='border-b border-white/8 bg-white/[0.02] text-xs font-semibold text-white/50 tracking-wider'>
+                      <th className='py-4 px-5 w-12'>
+                        <input
+                          type='checkbox'
+                          className='rounded border-white/10 bg-black/40 text-brand-500 focus:ring-brand-500 focus:ring-offset-0'
+                          checked={
+                            paginatedPayments.length > 0 &&
+                            paginatedPayments
+                              .filter((p) => p.status === 'pending' || p.status === 'deposit_paid' || p.status === 'overdue')
+                              .every((p) => selectedPaymentIds.includes(p.id))
+                          }
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              const selectable = paginatedPayments
+                                .filter((p) => p.status === 'pending' || p.status === 'deposit_paid' || p.status === 'overdue')
+                                .map((p) => p.id);
+                              setSelectedPaymentIds((prev) => Array.from(new Set([...prev, ...selectable])));
+                            } else {
+                              const currentSelectableIds = paginatedPayments.map((p) => p.id);
+                              setSelectedPaymentIds((prev) => prev.filter((id) => !currentSelectableIds.includes(id)));
+                            }
+                          }}
+                        />
+                      </th>
                       <th className='py-4 px-5'>Allievo</th>
                       <th className='py-4 px-5'>Descrizione</th>
                       <th className='py-4 px-5'>Importo Versato</th>
@@ -604,9 +857,53 @@ export default function PaymentsPage() {
                   <tbody className='divide-y divide-white/5 text-sm text-white/80'>
                     {filteredPayments.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="p-8 text-center text-white/40">Nessun pagamento trovato</td>
+                        <td colSpan={7} className="p-10 text-center">
+                          <div className="flex flex-col items-center justify-center gap-3 max-w-md mx-auto">
+                            <p className="text-white/60 text-sm">
+                              {matchingStudents.length > 0
+                                ? `Nessun pagamento registrato per ${matchingStudents[0].firstName} ${matchingStudents[0].lastName}.`
+                                : 'Nessun pagamento trovato con i filtri attuali.'}
+                            </p>
+                            <div className="flex flex-wrap items-center justify-center gap-2">
+                              {matchingStudents.length > 0 ? (
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    setQuickStudentId(matchingStudents[0].id);
+                                    setIsQuickPaymentOpen(true);
+                                  }}
+                                  icon={<CheckCircle size={14} />}
+                                  className="bg-brand-500 hover:bg-brand-600 text-white font-semibold"
+                                >
+                                  Registra Pagamento per {matchingStudents[0].firstName}
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  onClick={() => {
+                                    setQuickStudentId(undefined);
+                                    setIsQuickPaymentOpen(true);
+                                  }}
+                                  icon={<CheckCircle size={14} />}
+                                  className="bg-brand-500 hover:bg-brand-600 text-white font-semibold"
+                                >
+                                  Registra Pagamento
+                                </Button>
+                              )}
+                              {monthFilter !== 0 && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setMonthFilter(0)}
+                                >
+                                  Mostra tutti i mesi
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        </td>
                       </tr>
-                    ) : filteredPayments.map((p) => {
+                    ) : paginatedPayments.map((p) => {
                       const student = students.find(s => s.id === p.studentId);
                       const isOverdue = p.status === 'pending' && p.dueDate.toDate() < new Date();
                       const statusVariant = 
@@ -623,30 +920,30 @@ export default function PaymentsPage() {
                       return (
                         <tr key={p.id} className='hover:bg-white/[0.03] transition-colors group'>
                           <td className='py-3.5 px-5'>
-                             <div className="flex flex-wrap items-center gap-2">
-                               <p className="font-semibold text-white">{student ? `${student.lastName} ${student.firstName}` : 'N/D'}</p>
-                               {student?.flatRateEnabled && (
-                                 <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-gold-500/10 text-gold-300 border border-gold-500/20 shadow-[0_0_10px_rgba(245,158,11,0.1)]">
-                                   ✨ Flat Rate
-                                 </span>
-                               )}
-                             </div>
-                           </td>
-                           <td className='py-3.5 px-5'>
-                             <p className="text-white/90">{p.description}</p>
-                             {p.courseId && (
-                               <p className="text-xs text-white/40">
-                                 {student?.flatRateEnabled && p.type === 'monthly' ? (
-                                   <span>
-                                     <s className="opacity-50">{courses.find(c => c.id === p.courseId)?.name}</s>
-                                     <span className="text-gold-400 font-semibold ml-2">(Incluso nella quota forfettaria)</span>
-                                   </span>
-                                 ) : (
-                                   courses.find(c => c.id === p.courseId)?.name
-                                 )}
-                               </p>
-                             )}
-                           </td>
+                            {(p.status === 'pending' || p.status === 'deposit_paid' || p.status === 'overdue') ? (
+                              <input
+                                type='checkbox'
+                                className='rounded border-white/10 bg-black/40 text-brand-500 focus:ring-brand-500 focus:ring-offset-0'
+                                checked={selectedPaymentIds.includes(p.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedPaymentIds((prev) => [...prev, p.id]);
+                                  } else {
+                                    setSelectedPaymentIds((prev) => prev.filter((id) => id !== p.id));
+                                  }
+                                }}
+                              />
+                            ) : (
+                              <div className='w-4 h-4' />
+                            )}
+                          </td>
+                          <td className='py-3.5 px-5'>
+                            <p className="font-semibold text-white uppercase">{student ? `${student.lastName} ${student.firstName}` : 'N/D'}</p>
+                          </td>
+                          <td className='py-3.5 px-5'>
+                            <p className="text-white/90">{p.description}</p>
+                            {p.courseId && <p className="text-xs text-white/40">{courses.find(c => c.id === p.courseId)?.name}</p>}
+                          </td>
                           <td className='py-3.5 px-5 font-bold text-white'>
                             <div>
                               €{(p.paidAmount ?? 0).toFixed(2)}
@@ -664,15 +961,27 @@ export default function PaymentsPage() {
                           <td className='py-3.5 px-5 text-right'>
                             <div className='flex justify-end items-center gap-2'>
                               {(p.status === 'pending' || p.status === 'deposit_paid' || p.status === 'overdue') && (
-                                <Button
-                                  size="sm"
-                                  onClick={() => setPayingPayment(p)}
-                                  icon={<CheckCircle size={14} />}
-                                >
-                                  Incassa
-                                </Button>
+                                <>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                                    onClick={() => handleSendWhatsAppPayment(p, student)}
+                                    icon={<MessageCircle size={14} />}
+                                    title="Invia sollecito WhatsApp (senza IBAN)"
+                                  >
+                                    WhatsApp
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    onClick={() => setPayingPayment(p)}
+                                    icon={<CheckCircle size={14} />}
+                                  >
+                                    Incassa
+                                  </Button>
+                                </>
                               )}
-                              {(p.status === 'paid' || p.status === 'deposit_paid') && p.receiptURL && (
+                              {(p.status === 'paid' || p.status === 'deposit_paid') && (p.receiptURL || p.receiptNumber) && (
                                 <Button
                                   variant="secondary"
                                   size="sm"
@@ -704,6 +1013,48 @@ export default function PaymentsPage() {
                     })}
                   </tbody>
                 </table>
+              </div>
+
+              {/* Pagination Controls */}
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 border-t border-white/5 bg-white/[0.01]">
+                <div className="flex items-center gap-2 text-xs text-white/50">
+                  <span>Righe per pagina:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => {
+                      setPageSize(Number(e.target.value));
+                      setCurrentPage(1);
+                    }}
+                    className="bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-white focus:outline-none focus:border-brand-500"
+                  >
+                    {[10, 25, 50].map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-4 text-sm">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage === 1}
+                    onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  >
+                    Precedente
+                  </Button>
+                  <span className="text-xs text-white/60">
+                    Pagina <strong className="text-white">{currentPage}</strong> di <strong className="text-white">{totalPages}</strong>
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={currentPage === totalPages}
+                    onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  >
+                    Successiva
+                  </Button>
+                </div>
               </div>
             </Card>
           </div>
@@ -1146,7 +1497,7 @@ export default function PaymentsPage() {
               <div className="p-3 bg-white/5 rounded-xl border border-white/5 text-xs text-white/50 space-y-1">
                 <p className="font-semibold text-white/75">Nota sui filtri attivi:</p>
                 <p>Questo report utilizzerà i filtri impostati a schermo:</p>
-                <p>· Mese: {monthFilter === 0 ? 'Tutti i mesi' : `Mese ${monthFilter}`}</p>
+                <p>· Mese: {monthFilter === 0 ? 'Tutti i mesi' : (ITALIAN_MONTHS[monthFilter - 1] || `Mese ${monthFilter}`)}</p>
                 <p>· Corso: {courseFilter === 'all' ? 'Tutti i corsi' : courses.find(c => c.id === courseFilter)?.name}</p>
                 <p>· Stato: {statusFilter === 'all' ? 'Tutti gli stati' : statusFilter.toUpperCase()}</p>
               </div>
@@ -1182,7 +1533,7 @@ export default function PaymentsPage() {
                 label="Mese"
                 value={String(genMonth)}
                 onChange={(e) => setGenMonth(Number(e.target.value))}
-                options={Array.from({ length: 12 }).map((_, i) => ({ value: String(i + 1), label: `Mese ${i + 1}` }))}
+                options={ITALIAN_MONTHS.map((m, i) => ({ value: String(i + 1), label: m }))}
               />
               <Input
                 label="Anno"
@@ -1210,6 +1561,16 @@ export default function PaymentsPage() {
         <PaymentForm
           isOpen={isFormOpen}
           onClose={() => setIsFormOpen(false)}
+        />
+
+        {/* MODAL: REGISTRAZIONE PAGAMENTO RAPIDO */}
+        <QuickPaymentModal
+          isOpen={isQuickPaymentOpen}
+          onClose={() => {
+            setIsQuickPaymentOpen(false);
+            setQuickStudentId(undefined);
+          }}
+          initialStudentId={quickStudentId}
         />
       </div>
     </ErrorBoundary>

@@ -20,6 +20,8 @@ export interface RegistrationPayload {
   addressProvince: string;
   addressPostalCode: string;
   courseInterest: string;
+  courseIds?: string[];
+  signatureBase64?: string;
   pdfUrl: string;
   sha256Hash: string;
   signatureMetadata: {
@@ -63,6 +65,9 @@ export const submitRegistrationRequest = async (
     studentPhone: data.studentPhone?.trim() || null,
     studentEmail: data.studentEmail?.trim() || null,
     courseInterest: data.courseInterest,
+    courseIds: data.courseIds || [],
+    signatureBase64: data.signatureBase64 || null,
+    signatureUrl: data.signatureBase64 || null,
     pdfUrl: data.pdfUrl,
     sha256Hash: data.sha256Hash,
     signatureMetadata: {

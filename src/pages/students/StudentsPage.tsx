@@ -28,8 +28,15 @@ import {
   ChevronRight,
   BellRing,
   Download,
-  Trash2
+  Trash2,
+  MessageCircle
 } from 'lucide-react';
+import { 
+  openWhatsAppChat, 
+  getStudentWhatsAppPhone, 
+  buildMedicalReminderWhatsAppMessage,
+  buildFiscalCodeReminderWhatsAppMessage 
+} from '@/lib/whatsapp';
 import { format } from 'date-fns';
 
 export default function StudentsPage() {
@@ -155,7 +162,7 @@ export default function StudentsPage() {
 
       // Inserisce log degli errori se presenti
       if (errorLogs.length > 0) {
-        const reportContent = `REPORT ERRORI DI SCARICAMENTO - DANCEFLOW\n` +
+        const reportContent = `REPORT ERRORI DI SCARICAMENTO - TROPICAL STYLE\n` +
           `Data: ${new Date().toLocaleString('it-IT')}\n\n` +
           `I seguenti documenti non sono stati inclusi nello ZIP a causa di errori di rete o CORS:\n\n` +
           errorLogs.join('\n');
@@ -188,7 +195,7 @@ export default function StudentsPage() {
 
   // ─── Component State ────────────────────────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive' | 'toRenew'>('active');
   const [courseFilter, setCourseFilter] = useState('all');
   const [docFilter, setDocFilter] = useState<'all' | 'complete' | 'incomplete'>('all');
   const [medicalFilter, setMedicalFilter] = useState<'all' | 'expired' | 'expiring' | 'missing'>('all');
@@ -198,6 +205,15 @@ export default function StudentsPage() {
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
 
   const [sendingReminderId, setSendingReminderId] = useState<string | null>(null);
+
+  // Pagination State
+  const [pageSize, setPageSize] = useState<number>(10);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+
+  // Reset page on filter change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, statusFilter, courseFilter, docFilter, medicalFilter]);
 
   // ─── Fetch data on mount ────────────────────────────────────────────────────
   useEffect(() => {
@@ -271,8 +287,10 @@ export default function StudentsPage() {
         statusFilter === 'all'
           ? true
           : statusFilter === 'active'
-            ? student.isActive
-            : !student.isActive;
+            ? student.isActive && student.status !== 'toRenew'
+            : statusFilter === 'toRenew'
+              ? student.status === 'toRenew'
+              : !student.isActive && student.status !== 'toRenew';
 
       // 3. Course Enrolled Filter
       const matchesCourse =
@@ -304,6 +322,15 @@ export default function StudentsPage() {
     });
   }, [students, searchQuery, statusFilter, courseFilter, docFilter, medicalFilter]);
 
+  const paginatedStudents = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    return filteredStudents.slice(startIndex, startIndex + pageSize);
+  }, [filteredStudents, currentPage, pageSize]);
+
+  const totalPages = useMemo(() => {
+    return Math.ceil(filteredStudents.length / pageSize) || 1;
+  }, [filteredStudents.length, pageSize]);
+
   // ─── Trigger Sollecito ──────────────────────────────────────────────────────
   async function handleSollecito(student: Student, e: React.MouseEvent) {
     e.stopPropagation(); // prevent row click
@@ -313,6 +340,42 @@ export default function StudentsPage() {
     } finally {
       setSendingReminderId(null);
     }
+  }
+
+  function handleWhatsAppStudentReminder(student: Student, type: 'medical' | 'fiscal', e: React.MouseEvent) {
+    e.stopPropagation();
+    const phone = getStudentWhatsAppPhone(student);
+    if (!phone) {
+      toast.error(`Nessun recapito telefonico trovato per ${student.firstName} ${student.lastName}`);
+      return;
+    }
+    const parentName = student.contact?.parentName;
+    const studentName = `${student.firstName} ${student.lastName}`;
+    const certStatus = getMedicalCertStatus(student);
+
+    let message = '';
+    if (type === 'medical') {
+      const isExpired = certStatus === 'expired';
+      const expiryDateStr = student.medicalInfo?.medicalClearanceExpiry 
+        ? format(student.medicalInfo.medicalClearanceExpiry.toDate(), 'dd/MM/yyyy') 
+        : null;
+      message = buildMedicalReminderWhatsAppMessage({
+        parentName,
+        studentName,
+        isExpired,
+        expiryDateStr,
+        schoolName: 'Tropical Style Caribbean School'
+      });
+    } else {
+      message = buildFiscalCodeReminderWhatsAppMessage({
+        parentName,
+        studentName,
+        schoolName: 'Tropical Style Caribbean School'
+      });
+    }
+
+    openWhatsAppChat(phone, message);
+    toast.success(`Apertura WhatsApp per ${student.firstName}...`);
   }
 
   async function handleDeleteStudent(studentId: string, e: React.MouseEvent) {
@@ -406,8 +469,13 @@ export default function StudentsPage() {
               <div>
                 <p className='text-xs text-white/50'>Allievi Attivi</p>
                 <p className='text-xl font-display font-bold text-white'>
-                  {stats.active} <span className='text-xs text-white/30 font-sans'>/ {stats.total}</span>
+                  {stats.active} <span className='text-xs text-white/40 font-sans'>/ {stats.total} registrati</span>
                 </p>
+                {stats.total - stats.active > 0 && (
+                  <p className='text-[10px] text-white/40 pt-0.5'>
+                    ({stats.total - stats.active} inattivi/sospesi)
+                  </p>
+                )}
               </div>
             </div>
           </Card>
@@ -511,6 +579,7 @@ export default function StudentsPage() {
                   options={[
                     { value: 'active', label: 'Stato: Solo Attivi' },
                     { value: 'inactive', label: 'Stato: Solo Inattivi' },
+                    { value: 'toRenew', label: 'Stato: Da Rinnovare' },
                     { value: 'all', label: 'Stato: Tutti' },
                   ]}
                   value={statusFilter}
@@ -577,7 +646,7 @@ export default function StudentsPage() {
                 </tr>
               </thead>
               <tbody className='divide-y divide-white/5 text-sm text-white/80'>
-                {filteredStudents.map((st) => {
+                {paginatedStudents.map((st) => {
                   const docCount = st.documents?.length ?? 0;
                   const certStatus = getMedicalCertStatus(st);
                   const isMin = getAge(st.dateOfBirth) < 18;
@@ -594,7 +663,7 @@ export default function StudentsPage() {
                           {st.firstName[0]}{st.lastName[0]}
                         </div>
                         <div>
-                          <p className='font-semibold text-white group-hover:text-brand-300 transition-colors'>
+                          <p className='font-semibold text-white group-hover:text-brand-300 transition-colors uppercase'>
                             {st.lastName} {st.firstName}
                           </p>
                           <p className='text-xs text-white/40'>{st.fiscalCode || '—'}</p>
@@ -613,8 +682,8 @@ export default function StudentsPage() {
 
                       {/* Status */}
                       <td className='py-3.5 px-5'>
-                        <Badge variant={st.isActive ? 'success' : 'gray'} size='sm'>
-                          {st.isActive ? 'Attivo' : 'Inattivo'}
+                        <Badge variant={st.status === 'toRenew' ? 'warning' : st.isActive ? 'success' : 'gray'} size='sm'>
+                          {st.status === 'toRenew' ? 'Da Rinnovare' : st.isActive ? 'Attivo' : 'Inattivo'}
                         </Badge>
                       </td>
 
@@ -666,6 +735,18 @@ export default function StudentsPage() {
                       {/* Actions */}
                       <td className='py-3.5 px-5 text-right' onClick={(e) => e.stopPropagation()}>
                         <div className='flex justify-end items-center gap-2'>
+                          {st.isActive && (certStatus !== 'valid' || !st.fiscalCode) && (
+                            <Button
+                              variant='outline'
+                              size='sm'
+                              onClick={(e) => handleWhatsAppStudentReminder(st, certStatus !== 'valid' ? 'medical' : 'fiscal', e)}
+                              icon={<MessageCircle size={13} />}
+                              className='border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10'
+                              title={certStatus !== 'valid' ? 'Sollecita Certificato Medico su WhatsApp' : 'Richiedi Codice Fiscale su WhatsApp'}
+                            >
+                              {certStatus !== 'valid' ? 'WA Medico' : 'WA Cod.Fisc.'}
+                            </Button>
+                          )}
                           {docCount < 3 && st.isActive && (
                             <Button
                               variant='outline'
@@ -702,7 +783,7 @@ export default function StudentsPage() {
         ) : (
           // ─── Grid View ───
           <div className='grid grid-cols-1 md:grid-cols-3 gap-4'>
-            {filteredStudents.map((st) => {
+            {paginatedStudents.map((st) => {
               const docCount = st.documents?.length ?? 0;
               const certStatus = getMedicalCertStatus(st);
 
@@ -719,14 +800,14 @@ export default function StudentsPage() {
                           {st.firstName[0]}{st.lastName[0]}
                         </div>
                         <div>
-                          <h4 className='font-semibold text-white group-hover:text-brand-300 transition-colors truncate max-w-[150px]'>
+                          <h4 className='font-semibold text-white group-hover:text-brand-300 transition-colors truncate max-w-[150px] uppercase'>
                             {st.lastName} {st.firstName}
                           </h4>
                           <p className='text-xs text-white/40'>{getAge(st.dateOfBirth)} anni</p>
                         </div>
                       </div>
-                      <Badge variant={st.isActive ? 'success' : 'gray'} size='sm'>
-                        {st.isActive ? 'Attivo' : 'Inattivo'}
+                      <Badge variant={st.status === 'toRenew' ? 'warning' : st.isActive ? 'success' : 'gray'} size='sm'>
+                        {st.status === 'toRenew' ? 'Da Rinnovare' : st.isActive ? 'Attivo' : 'Inattivo'}
                       </Badge>
                     </div>
 
@@ -796,6 +877,48 @@ export default function StudentsPage() {
             })}
           </div>
         )}
+
+        {/* Pagination Controls */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 glass rounded-2xl border border-white/5 mt-4">
+          <div className="flex items-center gap-2 text-xs text-white/50">
+            <span>Righe per pagina:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setCurrentPage(1);
+              }}
+              className="bg-black/40 border border-white/10 rounded-lg px-2 py-1 text-white focus:outline-none focus:border-brand-500"
+            >
+              {[10, 25, 50].map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-4 text-sm">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={currentPage === 1}
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            >
+              Precedente
+            </Button>
+            <span className="text-xs text-white/60">
+              Pagina <strong className="text-white">{currentPage}</strong> di <strong className="text-white">{totalPages}</strong>
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={currentPage === totalPages}
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            >
+              Successiva
+            </Button>
+          </div>
+        </div>
 
         {/* Modal Creation/Edit Form */}
         <StudentForm

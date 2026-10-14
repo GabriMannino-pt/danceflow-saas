@@ -85,10 +85,29 @@ export function useCostumes() {
     }
   }
 
+  // ─── Aggiorna Ordine Completo ────────────────────────────────────────────────
+  async function updateOrder(orderId: string, updates: Partial<CostumeOrder>) {
+    if (!schoolId) throw new Error('Not authenticated');
+
+    try {
+      const orderRef = doc(db, COLLECTIONS.costumes(schoolId), orderId).withConverter(costumeOrderConverter);
+      await updateDoc(orderRef, {
+        ...updates,
+        updatedAt: nowTimestamp(),
+      });
+      toast.success('Ordine costumi aggiornato.');
+    } catch (err) {
+      console.error('[useCostumes] Update error:', err);
+      toast.error('Impossibile aggiornare l\'ordine.');
+      throw err;
+    }
+  }
+
   return {
     loading,
     orders,
     createOrder,
     updateOrderStatus,
+    updateOrder,
   };
 }
