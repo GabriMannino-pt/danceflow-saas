@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   collection,
   doc,
@@ -8,6 +8,7 @@ import {
   deleteDoc,
   query,
   getDoc,
+  onSnapshot,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import {
@@ -37,6 +38,44 @@ export function useStudents() {
     removeStudent: storeRemoveStudent,
     setLoadingStudents,
   } = useSchoolStore();
+
+  // ─── Real-time Subscription ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!schoolId || user?.role === 'parent') {
+      return;
+    }
+
+    setLoadingStudents(true);
+
+    const q = query(
+      collection(db, COLLECTIONS.students(schoolId)).withConverter(studentConverter)
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const fetched = snapshot.docs
+          .map((d) => d.data())
+          .filter((s) => s.isDeleted !== true);
+        // Sort by lastName, then firstName in memory for stability
+        fetched.sort((a, b) => {
+          const lastCompare = a.lastName.localeCompare(b.lastName, 'it');
+          if (lastCompare !== 0) return lastCompare;
+          return a.firstName.localeCompare(b.firstName, 'it');
+        });
+        setStudents(fetched);
+        setLoadingStudents(false);
+      },
+      (error) => {
+        console.error('[useStudents] onSnapshot error:', error);
+        setLoadingStudents(false);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [schoolId, user?.role, setStudents, setLoadingStudents]);
 
   // ─── Fetch Students ─────────────────────────────────────────────────────────
   async function fetchStudents() {

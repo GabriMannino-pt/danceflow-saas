@@ -1,6 +1,10 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { collection, query, where, getDocs } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
+import { COLLECTIONS, userConverter } from '@/lib/converters';
 import { useCourses } from '@/hooks/useCourses';
+import { useStudents } from '@/hooks/useStudents';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { useAuthStore } from '@/stores/authStore';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -22,17 +26,19 @@ import {
   Printer,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { generateSecretaryPaymentsRegistryPDF } from '@/services/pdf/SecretaryPaymentsRegistryPdfBuilder';
+import { generateAllCoursesAttendanceGridPDF } from '@/services/pdf/CourseGridPdfBuilder';
 
 export default function CoursesPage() {
   const navigate = useNavigate();
 
-  // Initialize real-time courses listening
+  // Initialize real-time courses and students listening
   const { deleteCourse } = useCourses();
+  useStudents();
 
   const { courses, isLoadingCourses, students, activeSchool } = useSchoolStore();
   const user = useAuthStore((s) => s.user);
   const isTeacher = user?.role === 'teacher';
+  const schoolId = user?.schoolId;
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('active');
@@ -41,24 +47,44 @@ export default function CoursesPage() {
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingCourse, setEditingCourse] = useState<Course | null>(null);
   const [isPrintingAll, setIsPrintingAll] = useState(false);
+  const [teachersMap, setTeachersMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!schoolId) return;
+    const q = query(
+      collection(db, COLLECTIONS.users).withConverter(userConverter),
+      where('schoolId', '==', schoolId),
+      where('role', '==', 'teacher')
+    );
+    getDocs(q).then((snap) => {
+      const map: Record<string, string> = {};
+      snap.docs.forEach((d) => {
+        const u = d.data();
+        const fullName = (u.displayName || u.email || 'Insegnante').trim();
+        if (u.id) map[u.id] = fullName;
+        if (u.uid) map[u.uid] = fullName;
+      });
+      setTeachersMap(map);
+    }).catch((err) => console.error('[CoursesPage] Error loading teachers:', err));
+  }, [schoolId]);
 
   const handlePrintSecretaryRegistry = () => {
     try {
       setIsPrintingAll(true);
-      const activeStudents = students.filter((s) => !s.isDeleted && s.isActive);
-      if (activeStudents.length === 0) {
-        toast.error('Nessun allievo attivo da includere nel registro.');
+      const activeCourses = courses.filter((c) => !c.isDeleted && c.isActive);
+      if (activeCourses.length === 0) {
+        toast.error('Nessun corso attivo trovato da stampare.');
         return;
       }
-      const doc = generateSecretaryPaymentsRegistryPDF({
-        students,
+      const doc = generateAllCoursesAttendanceGridPDF(
         courses,
-        school: activeSchool,
-        academicYear: '2025/2026',
-        emptyRowsCount: 10,
-      });
-      doc.save(`Registro_Generale_Incassi_Segreteria_${new Date().getFullYear()}.pdf`);
-      toast.success(`Scaricato Registro Generale Incassi Segreteria (${activeStudents.length} allievi)!`);
+        students,
+        activeSchool,
+        teachersMap,
+        '2025/2026'
+      );
+      doc.save(`Registro_Corsi_Presenze_Quote_${new Date().getFullYear()}.pdf`);
+      toast.success(`Scaricato Registro Corsi (${activeCourses.length} corsi)!`);
     } catch (err: any) {
       console.error('[CoursesPage] Error generating secretary registry PDF:', err);
       toast.error('Impossibile generare il registro segreteria.');
@@ -158,7 +184,7 @@ export default function CoursesPage() {
                 disabled={isPrintingAll}
                 icon={<Printer size={18} />}
               >
-                {isPrintingAll ? 'Generazione...' : 'Stampa Registro Incassi Segreteria (A-Z)'}
+                {isPrintingAll ? 'Generazione...' : 'Stampa Registro Incassi Segreteria'}
               </Button>
               <Button
                 onClick={() => {

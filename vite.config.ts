@@ -12,7 +12,8 @@ export default defineConfig({
     alias: { '@': path.resolve(import.meta.dirname, './src') },
   },
   build: {
-    minify: 'oxc',
+    minify: false,
+    cssMinify: false,
     sourcemap: false,
     chunkSizeWarningLimit: 1000,
   },
