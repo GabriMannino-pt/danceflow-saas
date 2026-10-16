@@ -65,3 +65,8 @@ page2_preview.png
 anteprima_registro_segreteria.html
 logo_tropical_extracted.png
 tropical_logo_clean.png
+
+# Local scratch & build cache
+scratch_*
+*.tsbuildinfo
+screenshots/
