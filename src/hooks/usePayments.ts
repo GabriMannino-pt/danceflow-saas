@@ -61,7 +61,7 @@ export function usePayments() {
     return () => {
       unsubscribe();
     };
-  }, [schoolId, setPayments, setLoadingPayments]);
+  }, [schoolId, user?.role, setPayments, setLoadingPayments]);
 
   // ─── Create Single Payment ──────────────────────────────────────────────────
   async function createPayment(data: Omit<Payment, 'id' | 'schoolId' | 'createdAt' | 'updatedAt'>) {
@@ -511,6 +511,99 @@ export function usePayments() {
     }
   }
 
+  // ─── Modifica Ricevuta con Stesso Numero (Preserva Contatore) ───────────────
+  async function updateReceiptPayment(
+    paymentId: string,
+    updateData: {
+      method?: PaymentMethod;
+      paidAt?: Date;
+      dueDate?: Date;
+      description?: string;
+      month?: number;
+      year?: number;
+      notes?: string;
+      amount?: number;
+    }
+  ) {
+    if (!schoolId) throw new Error('Not authenticated to a school');
+    try {
+      const ref = doc(db, COLLECTIONS.payments(schoolId), paymentId).withConverter(paymentConverter);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) throw new Error('Payment not found');
+      const p = snap.data();
+
+      // STRICT INTEGRITY GUARANTEE:
+      // Strictly preserves the existing receiptNumber unchanged.
+      // Never calls getNextReceiptNumber or touches counters/receipts.
+      const existingReceiptNumber = p.receiptNumber;
+
+      const paidAtTimestamp = updateData.paidAt
+        ? Timestamp.fromDate(updateData.paidAt)
+        : (p.paidAt || nowTimestamp());
+
+      const dueDateTimestamp = updateData.dueDate
+        ? Timestamp.fromDate(updateData.dueDate)
+        : (updateData.paidAt ? Timestamp.fromDate(updateData.paidAt) : p.dueDate);
+
+      let updatedInstallments = p.payments;
+      if (p.payments && p.payments.length > 0) {
+        updatedInstallments = p.payments.map((inst, idx) => {
+          if (idx === 0 || p.payments!.length === 1) {
+            return {
+              ...inst,
+              ...(updateData.method ? { method: updateData.method } : {}),
+              date: paidAtTimestamp,
+              ...(updateData.notes !== undefined ? { notes: updateData.notes.trim() || undefined } : {}),
+              ...(updateData.amount !== undefined ? { amount: updateData.amount } : {}),
+            };
+          }
+          return inst;
+        });
+      }
+
+      const updates: Partial<Payment> = {
+        ...(updateData.method ? { method: updateData.method } : {}),
+        paidAt: paidAtTimestamp,
+        dueDate: dueDateTimestamp,
+        ...(updateData.description !== undefined ? { description: updateData.description.trim() } : {}),
+        ...(updateData.month !== undefined ? { month: updateData.month } : {}),
+        ...(updateData.year !== undefined ? { year: updateData.year } : {}),
+        ...(updateData.notes !== undefined ? { notes: updateData.notes.trim() || undefined } : {}),
+        ...(updateData.amount !== undefined ? {
+          amount: updateData.amount,
+          totalAmount: updateData.amount,
+          paidAmount: updateData.amount,
+          remainingAmount: 0,
+        } : {}),
+        ...(updatedInstallments ? { payments: updatedInstallments } : {}),
+        // Preserve immutable receipt credentials
+        receiptNumber: existingReceiptNumber,
+        receiptURL: p.receiptURL || (existingReceiptNumber ? `generated://receipt/${existingReceiptNumber}` : undefined),
+        updatedAt: nowTimestamp(),
+      };
+
+      await updateDoc(ref, removeUndefined(updates));
+
+      // Synchronize local state in Zustand schoolStore
+      useSchoolStore.setState((state) => ({
+        payments: state.payments.map((item) =>
+          item.id === paymentId ? { ...item, ...updates } : item
+        ),
+      }));
+
+      const updatedPayment: Payment = {
+        ...p,
+        ...updates,
+      };
+
+      return updatedPayment;
+    } catch (err) {
+      console.error('[usePayments] updateReceiptPayment error:', err);
+      toast.error('Errore durante la modifica della ricevuta.');
+      throw err;
+    }
+  }
+
   // ─── Direct Instant Payment (Registration / Monthly with dynamic custom amount) ───
   async function registerDirectPayment(data: {
     studentId: string;
@@ -628,7 +721,7 @@ export function usePayments() {
           : `Pagamento di €${data.amount.toFixed(2)} registrato con successo!`
       );
       return { payment: newPayment, installment };
-    } catch (err: any) {
+    } catch (err) {
       console.error('[usePayments] registerDirectPayment error:', err);
       toast.error('Errore durante la registrazione del pagamento.');
       throw err;
@@ -647,5 +740,6 @@ export function usePayments() {
     emitInstallmentReceipt,
     cancelPayment,
     deletePayment,
+    updateReceiptPayment,
   };
 }

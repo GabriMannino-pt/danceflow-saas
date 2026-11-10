@@ -33,6 +33,7 @@ import { SignaturePad } from '@/components/registration/SignaturePad';
 import { generateRegistrationPdf } from '@/services/pdf/RegistrationPdfBuilder';
 import { uploadRegistrationForm } from '@/services/api/storageService';
 import { logout } from '@/hooks/useAuth';
+import { compressMedicalCertificate, openDocumentBlobUrl } from '@/utils/fileCompression';
 
 export default function ParentPortalPage() {
   const user = useAuthStore((s) => s.user);
@@ -389,21 +390,28 @@ export default function ParentPortalPage() {
     }
 
     setIsUploading(true);
+    const toastId = toast.loading('Compressione e caricamento certificato in corso...');
     try {
+      // 1. Client-side compression (JPG/PNG via Canvas to ~150-200 KB, or PDF via FileReader)
+      const { dataUrl, fileName, fileSizeKb } = await compressMedicalCertificate(selectedFile);
+
+      // 2. Store directly in Firestore with isValidated: false
       await uploadStudentDocument(
         selectedStudent.id,
         'medical',
-        selectedFile.name,
+        fileName,
         uploadNotes || 'Caricato autonomamente dal Portale Genitori',
-        new Date(expiryDate)
+        new Date(expiryDate),
+        false,
+        dataUrl
       );
-      toast.success('Certificato medico caricato con successo!');
+      toast.success(`Certificato medico inviato alla segreteria (${fileSizeKb} KB)!`, { id: toastId });
       setSelectedFile(null);
       setExpiryDate('');
       setUploadNotes('');
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      toast.error('Errore durante il caricamento del certificato.');
+      toast.error(err.message || 'Errore durante il caricamento del certificato.', { id: toastId });
     } finally {
       setIsUploading(false);
     }
@@ -557,8 +565,6 @@ export default function ParentPortalPage() {
 
       const updates = {
         documents: updatedDocs,
-        status: 'active' as const,
-        isActive: true,
         signatureMetadata,
         sha256Hash,
         updatedAt: nowTimestamp(),
@@ -818,6 +824,33 @@ export default function ParentPortalPage() {
                                   >
                                     ✍️ {label}: Da Firmare
                                   </button>
+                                );
+                              }
+
+                              if (type === 'medical') {
+                                if (isMedicalPending) {
+                                  return (
+                                    <span
+                                      key={type}
+                                      className="text-[9px] px-2.5 py-0.5 rounded-full font-semibold border bg-amber-500/20 text-amber-300 border-amber-500/30 flex items-center gap-1"
+                                    >
+                                      ⏳ {label}: In Revisione
+                                    </span>
+                                  );
+                                }
+                                const isCleared = selectedStudent.medicalInfo?.medicalClearance;
+                                const isMedOk = Boolean(isCleared && !isExpired);
+                                return (
+                                  <span
+                                    key={type}
+                                    className={`text-[9px] px-2 py-0.5 rounded-full font-semibold border ${
+                                      isMedOk
+                                        ? 'bg-teal-500/10 text-teal-400 border-teal-500/20'
+                                        : 'bg-coral-500/10 text-coral-400 border-coral-500/20 animate-pulse'
+                                    }`}
+                                  >
+                                    {label}: {isMedOk ? 'OK' : 'Mancante'}
+                                  </span>
                                 );
                               }
 
@@ -1200,10 +1233,10 @@ export default function ParentPortalPage() {
                           <div className='flex items-center justify-between text-xs py-1'>
                             <span className='text-white/70'>Certificato Medico</span>
                             {isMedicalPending ? (
-                              <Badge variant='gold' size='sm'>In revisione</Badge>
+                              <Badge variant='warning' size='sm'>⏳ In Revisione</Badge>
                             ) : isExpired ? (
                               <Badge variant='danger' size='sm'>Scaduto</Badge>
-                            ) : selectedStudent.documents?.some((d) => d.type === 'medical') ? (
+                            ) : selectedStudent.medicalInfo?.medicalClearance ? (
                               <Badge variant='success' size='sm'>Valido</Badge>
                             ) : (
                               <Badge variant='danger' size='sm'>Mancante</Badge>
@@ -1257,6 +1290,52 @@ export default function ParentPortalPage() {
                             <Download size={13} />
                             Scarica PDF Firmato
                           </a>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Medical Certificate View Card (if already uploaded) */}
+                  {(() => {
+                    const medDoc = selectedStudent?.documents?.find((d) => d.type === 'medical');
+                    if (!medDoc?.fileURL) return null;
+
+                    return (
+                      <div className='glass border border-brand-500/30 bg-brand-950/15 p-4 rounded-2xl space-y-3 relative overflow-hidden text-left shadow-md'>
+                        <div className='flex items-start justify-between gap-3'>
+                          <div className='flex items-start gap-3'>
+                            <div className='w-10 h-10 rounded-xl bg-brand-500/20 text-brand-300 flex items-center justify-center text-lg flex-shrink-0'>
+                              🩺
+                            </div>
+                            <div className='space-y-0.5'>
+                              <div className='flex items-center gap-2 flex-wrap'>
+                                <h4 className='text-xs font-bold text-white font-display'>
+                                  Certificato Medico Caricato
+                                </h4>
+                                <span className={`text-[9px] font-semibold px-2 py-0.5 rounded-full border ${
+                                  isMedicalPending
+                                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                    : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                }`}>
+                                  {isMedicalPending ? '⏳ In Revisione' : '✓ Approvato'}
+                                </span>
+                              </div>
+                              <p className='text-[10px] text-white/60 leading-relaxed'>
+                                {medDoc.name} · Ricevuto il {medDoc.uploadedAt ? format(medDoc.uploadedAt.toDate(), 'dd/MM/yyyy') : 'recente'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className='pt-2 border-t border-white/5 flex justify-end'>
+                          <button
+                            type='button'
+                            onClick={() => openDocumentBlobUrl(medDoc.fileURL!, medDoc.name)}
+                            className='flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-brand-500/20 hover:bg-brand-500/30 text-brand-300 border border-brand-500/30 hover:border-brand-500/50 transition-all cursor-pointer'
+                          >
+                            <Download size={13} />
+                            Visualizza Certificato
+                          </button>
                         </div>
                       </div>
                     );

@@ -1,5 +1,5 @@
 import { Badge } from '@/components/ui';
-import { isPast, isWithinInterval, addDays } from 'date-fns';
+import { isPast, isWithinInterval, addDays, format } from 'date-fns';
 import type { Student } from '@/types';
 
 interface MedicalStatusBadgeProps {
@@ -8,6 +8,16 @@ interface MedicalStatusBadgeProps {
 
 export function MedicalStatusBadge({ student }: MedicalStatusBadgeProps) {
   const info = student.medicalInfo;
+  const hasMedicalDoc = student.documents?.some((d) => d.type === 'medical');
+
+  // If certificate document has been uploaded by parent or staff but not cleared yet
+  if (hasMedicalDoc && !info?.medicalClearance) {
+    return (
+      <Badge variant="warning" size="sm">
+        ⏳ In Revisione
+      </Badge>
+    );
+  }
 
   if (!info?.medicalClearance || !info.medicalClearanceExpiry) {
     return (
@@ -53,7 +63,7 @@ export function MedicalStatusBadge({ student }: MedicalStatusBadgeProps) {
 
   return (
     <Badge variant="success" size="sm">
-      ✓ Certificato valido
+      ✓ Valido fino al {format(expiry, 'dd/MM/yyyy')}
     </Badge>
   );
 }

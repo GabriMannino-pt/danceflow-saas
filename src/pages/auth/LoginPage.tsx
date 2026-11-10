@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -14,12 +15,16 @@ const loginSchema = z.object({
 type LoginForm = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
+  const [searchParams] = useSearchParams();
+  const paramEmail = searchParams.get('email') || '';
+  const isFirstAccess = searchParams.get('firstAccess') === 'true' || searchParams.get('reset') === 'true';
+
   const [showPassword, setShowPassword] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   const [resetModalOpen, setResetModalOpen] = useState(false);
-  const [resetEmail, setResetEmail] = useState('');
+  const [resetEmail, setResetEmail] = useState(paramEmail);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -28,13 +33,33 @@ export default function LoginPage() {
     register,
     handleSubmit,
     watch,
+    setValue,
     formState: { errors, isSubmitting },
-  } = useForm<LoginForm>({ resolver: zodResolver(loginSchema) });
+  } = useForm<LoginForm>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: {
+      email: paramEmail,
+      password: '',
+    },
+  });
+
+  useEffect(() => {
+    if (paramEmail) {
+      setValue('email', paramEmail);
+      setResetEmail(paramEmail);
+    }
+    if (isFirstAccess) {
+      if (paramEmail) {
+        setResetEmail(paramEmail);
+      }
+      setResetModalOpen(true);
+    }
+  }, [paramEmail, isFirstAccess, setValue]);
 
   const currentEmail = watch('email');
 
   function openResetModal() {
-    setResetEmail(currentEmail || '');
+    setResetEmail(currentEmail || paramEmail || '');
     setResetSuccess(false);
     setResetError(null);
     setResetModalOpen(true);
@@ -124,6 +149,27 @@ export default function LoginPage() {
 
         <Card>
           <h2 className='text-xl font-display font-bold text-white mb-6'>Accedi al tuo account</h2>
+
+          {isFirstAccess && (
+            <div className='mb-5 p-4 rounded-2xl bg-brand-500/10 border border-brand-500/30 text-white space-y-2'>
+              <div className='flex items-center gap-2 text-brand-300 font-semibold text-sm'>
+                <span>✨</span>
+                <span>Benvenuto nel Portale Genitori & Allievi!</span>
+              </div>
+              <p className='text-xs text-white/70 leading-relaxed'>
+                Per completare l'attivazione e accedere alla scheda allievo e alle ricevute fiscali, imposta la tua password personale riservata.
+              </p>
+              <Button
+                type='button'
+                variant='secondary'
+                size='sm'
+                onClick={openResetModal}
+                className='w-full mt-1 border-brand-500/30 text-brand-200 hover:bg-brand-500/20'
+              >
+                🔑 Imposta Password di Accesso
+              </Button>
+            </div>
+          )}
 
           {authError && (
             <div
@@ -237,17 +283,23 @@ export default function LoginPage() {
       <Modal
         isOpen={resetModalOpen}
         onClose={() => setResetModalOpen(false)}
-        title="Recupero Password"
-        description="Inserisci l'indirizzo email del tuo account per ricevere il link di ripristino."
+        title={isFirstAccess ? "Benvenuto! Imposta la tua password" : "Recupero Password"}
+        description={
+          isFirstAccess
+            ? "Inserisci o conferma l'indirizzo email del tuo account per ricevere il link di attivazione e impostare la password del Portale."
+            : "Inserisci l'indirizzo email del tuo account per ricevere il link di ripristino."
+        }
       >
         {resetSuccess ? (
           <div className="text-center py-4 space-y-3">
             <div className="w-12 h-12 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center mx-auto">
               <CheckCircle2 size={24} />
             </div>
-            <h4 className="text-sm font-semibold text-white">Email Inviata!</h4>
+            <h4 className="text-sm font-semibold text-white">
+              {isFirstAccess ? "Link di Attivazione Inviato!" : "Email Inviata!"}
+            </h4>
             <p className="text-xs text-white/60 leading-relaxed max-w-sm mx-auto">
-              Abbiamo inviato un link di reimpostazione password a <strong className="text-white">{resetEmail}</strong>. Controlla anche la cartella spam.
+              Abbiamo inviato un link per impostare la password a <strong className="text-white">{resetEmail}</strong>. Controlla anche la cartella spam. Clicca sul link ricevuto per impostare la password, poi torna qui per accedere.
             </p>
             <div className="pt-2">
               <Button
@@ -255,7 +307,7 @@ export default function LoginPage() {
                 fullWidth
                 onClick={() => setResetModalOpen(false)}
               >
-                Chiudi
+                Ho capito, chiudi
               </Button>
             </div>
           </div>
@@ -291,7 +343,7 @@ export default function LoginPage() {
                 loading={resetLoading}
                 className="btn-primary-gradient"
               >
-                Invia Link di Ripristino
+                {isFirstAccess ? "Invia Link di Attivazione" : "Invia Link di Ripristino"}
               </Button>
             </div>
           </form>

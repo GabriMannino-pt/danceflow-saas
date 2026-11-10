@@ -121,7 +121,9 @@ service cloud.firestore {
         allow create: if isTeacherOfSchool(schoolId) && canCreateStudent(schoolId);
         allow update: if isTeacherOfSchool(schoolId)
           || (isParent() && resource.data.parentId == uid()
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['documents', 'medicalInfo', 'updatedAt', 'status', 'isActive', 'signatureMetadata', 'sha256Hash']));
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['documents', 'medicalInfo', 'updatedAt', 'signatureMetadata', 'sha256Hash'])
+              && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['medicalInfo'])
+                  || request.resource.data.medicalInfo.medicalClearance == false));
         allow delete: if isAdminOfSchool(schoolId);
       }
 
@@ -193,8 +195,11 @@ service cloud.firestore {
       // ─── Fiscal Codes Index (Anti-Doppione) ──────────────────────────────
       match /fiscalCodesIndex/{cf} {
         allow read: if true;
-        allow create: if request.resource.data.status in ['pending', 'registered'];
-        allow update, delete: if isAdminOfSchool(schoolId);
+        allow create: if request.resource.data.status in ['pending', 'registered', 'active']
+          || isTeacherOfSchool(schoolId)
+          || isAdminOfSchool(schoolId);
+        allow update, delete: if isAdminOfSchool(schoolId)
+          || isTeacherOfSchool(schoolId);
       }
 
       // ─── Counters (Atomic Receipt Sequences) ───────────────────────────

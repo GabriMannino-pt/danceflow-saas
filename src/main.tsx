@@ -51,6 +51,23 @@ if (sentryDsn) {
   });
 }
 
+// ─── Auto-Recovery on Deploy (Vite Chunk Preload Errors) ──────────────────────
+// When a new build is deployed to Firebase Hosting, chunk hashes change.
+// If an active session tries to navigate to a newly hashed route, Vite fires 'vite:preloadError'.
+// We automatically reload the window once to fetch the latest index.html seamlessly.
+window.addEventListener('vite:preloadError', (event) => {
+  const lastReload = sessionStorage.getItem('danceflow_chunk_reload');
+  const now = Date.now();
+  // Prevent infinite loop if reload occurred less than 10 seconds ago
+  if (!lastReload || now - parseInt(lastReload, 10) > 10000) {
+    sessionStorage.setItem('danceflow_chunk_reload', now.toString());
+    console.warn('[DanceFlow] Chunk preload error detected after deployment. Auto-reloading application...', event);
+    window.location.reload();
+  } else {
+    console.error('[DanceFlow] Repeated chunk preload error detected:', event);
+  }
+});
+
 function FallbackComponent() {
   return (
     <div className="min-h-screen bg-[#0F0A1E] flex flex-col items-center justify-center p-4 font-sans text-[#f8fafc]">

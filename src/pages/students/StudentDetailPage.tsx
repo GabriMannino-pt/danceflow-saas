@@ -29,15 +29,30 @@ import {
   Edit, BellRing, User, BookOpen, CreditCard,
   CheckSquare, FileText, Phone, Mail, MapPin, AlertTriangle,
   CheckCircle, XCircle, Upload, Download,
-  Shield, Heart, Clipboard, Clock, Trash2, Plus, MessageCircle
+  Shield, Heart, Clipboard, Clock, Trash2, Plus, MessageCircle,
+  Eye, ExternalLink, Smartphone, Copy, Info
 } from 'lucide-react';
 import { 
+  compressMedicalCertificate, 
+  openDocumentBlobUrl, 
+  dataUrlToBlob, 
+  isMockUrl 
+} from '@/utils/fileCompression';
+import { 
   openWhatsAppChat, 
+  cleanPhoneNumber,
   getStudentWhatsAppPhone, 
   buildPaymentReminderWhatsAppMessage,
   buildMedicalReminderWhatsAppMessage,
-  buildFiscalCodeReminderWhatsAppMessage 
+  buildFiscalCodeReminderWhatsAppMessage,
+  buildPortalInvitationWhatsAppMessage
 } from '@/lib/whatsapp';
+import {
+  resolvePortalTargetContact,
+  buildPortalActivationUrl,
+  sendPortalPasswordResetEmail,
+  provisionAndLinkPortalAccount,
+} from '@/services/portalInviteService';
 import { usePayments } from '@/hooks/usePayments';
 
 // ─── Tab type ──────────────────────────────────────────────────────────────────
@@ -58,10 +73,15 @@ function calcAge(ts: any): number {
   return differenceInYears(new Date(), ts.toDate());
 }
 
-function getMedicalStatus(student: Student): 'valid' | 'expiring' | 'expired' | 'missing' {
+function getMedicalStatus(student: Student): 'valid' | 'expiring' | 'expired' | 'missing' | 'in_review' {
   const info = student.medicalInfo;
+  const hasMedicalDoc = student.documents?.some((d) => d.type === 'medical');
+  if (hasMedicalDoc && !info?.medicalClearance) return 'in_review';
   if (!info?.medicalClearance || !info.medicalClearanceExpiry) return 'missing';
-  const expiry = info.medicalClearanceExpiry.toDate();
+  const expiry = typeof info.medicalClearanceExpiry.toDate === 'function'
+    ? info.medicalClearanceExpiry.toDate()
+    : new Date(info.medicalClearanceExpiry as any);
+  if (isNaN(expiry.getTime())) return 'missing';
   if (isPast(expiry)) return 'expired';
   if (isWithinInterval(expiry, { start: new Date(), end: addDays(new Date(), 30) })) return 'expiring';
   return 'valid';
@@ -78,8 +98,8 @@ export default function StudentDetailPage() {
   const user = useAuthStore((s) => s.user);
   const schoolId = user?.schoolId;
   const isTeacher = user?.role === 'teacher';
-  const { editStudent, sendDocumentReminder, uploadStudentDocument } = useStudents();
-  const { students, updateStudent: _u } = useSchoolStore();
+  const { editStudent, sendDocumentReminder, uploadStudentDocument, approveMedicalCertificate } = useStudents();
+  const { students, updateStudent: _u, activeSchool } = useSchoolStore();
 
   const availableTabs = useMemo(() => {
     return isTeacher ? TABS.filter((t) => t.id !== 'pagamenti') : TABS;
@@ -96,6 +116,7 @@ export default function StudentDetailPage() {
   const [isEditOpen, setIsEditOpen] = useState(false);
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isCostumeOpen, setIsCostumeOpen] = useState(false);
+  const [isPortalInviteOpen, setIsPortalInviteOpen] = useState(false);
   const [sendingReminder, setSendingReminder] = useState(false);
 
   // ─── Load student ────────────────────────────────────────────────────────────
@@ -198,6 +219,38 @@ export default function StudentDetailPage() {
     });
     openWhatsAppChat(phone, message);
     toast.success(`Apertura WhatsApp per ${student.firstName}...`);
+  }
+
+  async function handleApproveMedicalCertificate(docId?: string) {
+    if (!student) return;
+    const targetDoc = docId
+      ? student.documents?.find((d) => d.id === docId)
+      : student.documents?.find((d) => d.type === 'medical');
+    const expiryDate = student.medicalInfo?.medicalClearanceExpiry
+      ? (typeof student.medicalInfo.medicalClearanceExpiry.toDate === 'function'
+          ? student.medicalInfo.medicalClearanceExpiry.toDate()
+          : new Date(student.medicalInfo.medicalClearanceExpiry as any))
+      : undefined;
+
+    try {
+      await approveMedicalCertificate(student.id, targetDoc?.id, expiryDate);
+      setStudent((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          medicalInfo: {
+            ...prev.medicalInfo,
+            medicalClearance: true,
+            medicalClearanceExpiry: prev.medicalInfo?.medicalClearanceExpiry,
+          },
+          documents: (prev.documents || []).map((d) =>
+            (docId ? d.id === docId : d.type === 'medical') ? { ...d, isValidated: true } : d
+          ),
+        };
+      });
+    } catch (err) {
+      console.error('Error approving certificate:', err);
+    }
   }
 
   function handleWhatsAppFiscal() {
@@ -310,7 +363,19 @@ export default function StudentDetailPage() {
           subtitle={`${age} anni · ${enrolledCourses.map((c) => c.name).join(', ') || 'Nessun corso'}`}
           actions={
             <div className="flex gap-2 flex-wrap">
-              {medStatus !== 'valid' && (
+              {!isTeacher && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Smartphone size={14} />}
+                  onClick={() => setIsPortalInviteOpen(true)}
+                  className="bg-brand-600 hover:bg-brand-500 text-white"
+                  title="Invia credenziali di accesso al Portale Genitori & Allievi"
+                >
+                  📱 Invia Credenziali Portale
+                </Button>
+              )}
+              {medStatus !== 'valid' && medStatus !== 'in_review' && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -320,6 +385,17 @@ export default function StudentDetailPage() {
                   title="Sollecita certificato medico su WhatsApp"
                 >
                   WhatsApp Medico
+                </Button>
+              )}
+              {medStatus === 'in_review' && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<CheckCircle size={14} />}
+                  onClick={() => handleApproveMedicalCertificate()}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white"
+                >
+                  Approva Certificato
                 </Button>
               )}
               {!student.fiscalCode && (
@@ -447,7 +523,11 @@ export default function StudentDetailPage() {
 
         {/* Tab Content */}
         {activeTab === 'anagrafica' && (
-          <AnagraficaTab student={student} isMinor={isMinor} />
+          <AnagraficaTab
+            student={student}
+            isMinor={isMinor}
+            onOpenPortalInvite={!isTeacher ? () => setIsPortalInviteOpen(true) : undefined}
+          />
         )}
         {activeTab === 'corsi' && (
           <CorsiTab
@@ -475,6 +555,7 @@ export default function StudentDetailPage() {
             onUpload={() => setIsUploadOpen(true)}
             onSollecita={handleSollecito}
             sendingReminder={sendingReminder}
+            onApproveMedical={handleApproveMedicalCertificate}
           />
         )}
         {activeTab === 'costumi' && (
@@ -483,6 +564,27 @@ export default function StudentDetailPage() {
             onEdit={() => setIsCostumeOpen(true)}
           />
         )}
+
+        {/* Portal Invite Modal */}
+        <PortalInviteModal
+          isOpen={isPortalInviteOpen}
+          onClose={() => setIsPortalInviteOpen(false)}
+          student={student}
+          schoolId={schoolId!}
+          schoolName={activeSchool?.name || 'Tropical Style Caribbean School'}
+          onSuccess={(parentUid, updatedContact) => {
+            setStudent((prev) => (prev ? { ...prev, parentId: parentUid, ...(updatedContact ? { contact: updatedContact } : {}) } : null));
+            if (student) {
+              useSchoolStore.getState().updateStudent(student.id, {
+                parentId: parentUid,
+                ...(updatedContact ? { contact: updatedContact } : {}),
+              });
+            }
+            if (schoolId && studentId) {
+              void loadAll(schoolId, studentId);
+            }
+          }}
+        />
 
         {/* Costume Measurements Modal */}
         <CostumeModal
@@ -524,9 +626,57 @@ export default function StudentDetailPage() {
 }
 
 // ─── Tab: Anagrafica ──────────────────────────────────────────────────────────
-function AnagraficaTab({ student, isMinor }: { student: Student; isMinor: boolean }) {
+function AnagraficaTab({
+  student,
+  isMinor,
+  onOpenPortalInvite,
+}: {
+  student: Student;
+  isMinor: boolean;
+  onOpenPortalInvite?: () => void;
+}) {
   return (
     <div className="space-y-4">
+      {/* Portale Genitori & Allievi */}
+      <Card className="p-5 border border-white/8">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-brand-400 flex items-center gap-2">
+            <Smartphone size={13} /> Portale Genitori & Allievi
+          </h3>
+          <Badge variant={student.parentId ? 'success' : 'warning'}>
+            {student.parentId ? '✓ Account Collegato' : 'Non ancora collegato'}
+          </Badge>
+        </div>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-sm">
+          <div className="text-white/70 text-xs space-y-1">
+            {student.parentId ? (
+              <p>L'account genitore/allievo è attivo e collegato. Ricevute, certificati e presenze sono accessibili nel portale.</p>
+            ) : (
+              <p>Nessun account utente attualmente associato a questa scheda. Invia le credenziali per attivare l'accesso al Portale.</p>
+            )}
+            <p className="text-white/40">
+              Contatto primario:{' '}
+              <span className="text-white/80 font-medium">
+                {isMinor
+                  ? (student.contact.parentEmail || student.contact.studentEmail || 'Nessuna email salvata')
+                  : (student.contact.studentEmail || student.contact.parentEmail || 'Nessuna email salvata')}
+              </span>
+            </p>
+          </div>
+          {onOpenPortalInvite && (
+            <Button
+              size="sm"
+              variant="outline"
+              icon={<Smartphone size={14} />}
+              onClick={onOpenPortalInvite}
+              className="border-brand-500/30 text-brand-300 hover:bg-brand-500/10 shrink-0"
+            >
+              {student.parentId ? 'Invia Nuovo Invito' : '📱 Invia Credenziali Portale'}
+            </Button>
+          )}
+        </div>
+      </Card>
+
       {/* Dati Personali */}
       <Card className="p-5 border border-white/8">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-brand-400 mb-4 flex items-center gap-2">
@@ -1532,6 +1682,131 @@ function PresenzeTab({
   );
 }
 
+// ─── Modal: Document Preview ──────────────────────────────────────────────────
+function DocumentPreviewModal({
+  isOpen,
+  onClose,
+  doc,
+  student,
+  onApprove,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  doc: StudentDocument | null;
+  student: Student;
+  onApprove?: () => Promise<void> | void;
+}) {
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    if (doc?.fileURL?.startsWith('data:')) {
+      try {
+        const blob = dataUrlToBlob(doc.fileURL);
+        objectUrl = URL.createObjectURL(blob);
+        setBlobUrl(objectUrl);
+      } catch (e) {
+        setBlobUrl(null);
+      }
+    } else if (doc?.fileURL) {
+      setBlobUrl(doc.fileURL);
+    } else {
+      setBlobUrl(null);
+    }
+
+    return () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [doc]);
+
+  if (!doc) return null;
+
+  const isPdf = doc.fileURL?.startsWith('data:application/pdf') || doc.name.toLowerCase().endsWith('.pdf');
+  const isImage = doc.fileURL?.startsWith('data:image/') || /\.(jpe?g|png|webp|gif)$/i.test(doc.name);
+  const isMedicalPending = doc.type === 'medical' && !student.medicalInfo?.medicalClearance;
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={onClose}
+      title={doc.name}
+      description={`Documento ${doc.type} · Registrato il ${doc.uploadedAt ? format(doc.uploadedAt.toDate(), 'dd/MM/yyyy') : 'recente'}`}
+      size="xl"
+    >
+      <div className="space-y-4 max-h-[75vh] overflow-y-auto">
+        {isPdf && blobUrl && (
+          <div className="w-full h-[65vh] bg-surface-900 rounded-xl overflow-hidden border border-white/10">
+            <iframe
+              src={blobUrl}
+              className="w-full h-full border-0 bg-white"
+              title={doc.name}
+            />
+          </div>
+        )}
+
+        {isImage && (
+          <div className="flex items-center justify-center p-2 bg-black/40 rounded-xl border border-white/10">
+            <img
+              src={doc.fileURL}
+              alt={doc.name}
+              className="max-h-[65vh] max-w-full object-contain rounded-lg shadow-2xl"
+            />
+          </div>
+        )}
+
+        {!isPdf && !isImage && (
+          <div className="p-8 text-center text-white/60 space-y-2">
+            <p className="text-3xl">📄</p>
+            <p className="text-sm font-medium text-white">{doc.name}</p>
+            <p className="text-xs">Formato non visualizzabile in anteprima diretta.</p>
+          </div>
+        )}
+
+        {doc.notes && (
+          <div className="p-3 bg-white/5 rounded-xl border border-white/10 text-xs text-white/70">
+            <strong className="text-white">Note:</strong> {doc.notes}
+          </div>
+        )}
+      </div>
+
+      <ModalFooter>
+        <div className="flex items-center justify-between w-full">
+          <div>
+            {doc.fileURL && (
+              <Button
+                variant="secondary"
+                size="sm"
+                icon={<ExternalLink size={13} />}
+                onClick={() => openDocumentBlobUrl(doc.fileURL!, doc.name)}
+              >
+                Apri a schermo intero
+              </Button>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={onClose}>
+              Chiudi
+            </Button>
+            {isMedicalPending && onApprove && (
+              <Button
+                variant="primary"
+                size="sm"
+                icon={<CheckCircle size={14} />}
+                onClick={onApprove}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                Approva Certificato
+              </Button>
+            )}
+          </div>
+        </div>
+      </ModalFooter>
+    </Modal>
+  );
+}
+
 // ─── Tab: Documenti ───────────────────────────────────────────────────────────
 const DOC_TYPES: { type: StudentDocument['type']; label: string; desc: string; icon: React.ReactNode }[] = [
   { type: 'consent', label: 'Modulo di Iscrizione', desc: 'Modulo iscrizione/consenso firmato', icon: <Clipboard size={16} /> },
@@ -1540,15 +1815,17 @@ const DOC_TYPES: { type: StudentDocument['type']; label: string; desc: string; i
 ];
 
 function DocumentiTab({
-  student, medStatus, onUpload, onSollecita, sendingReminder,
+  student, medStatus, onUpload, onSollecita, sendingReminder, onApproveMedical,
 }: {
   student: Student;
   medStatus: string;
   onUpload: () => void;
   onSollecita: () => void;
   sendingReminder: boolean;
+  onApproveMedical?: (docId?: string) => Promise<void> | void;
 }) {
   const [isGdprModalOpen, setIsGdprModalOpen] = useState(false);
+  const [previewDoc, setPreviewDoc] = useState<StudentDocument | null>(null);
   const { activeSchool } = useSchoolStore();
 
   const handleOpenStudentDocument = async (doc?: StudentDocument) => {
@@ -1638,7 +1915,11 @@ function DocumentiTab({
     }
 
     if (doc.fileURL) {
-      window.open(doc.fileURL, '_blank');
+      if (isMockUrl(doc.fileURL)) {
+        toast.error('Documento registrato in modalità simulata. Ricarica il documento per visualizzarne l\'anteprima reale.');
+        return;
+      }
+      setPreviewDoc(doc);
     }
   };
 
@@ -1681,6 +1962,7 @@ function DocumentiTab({
             const isConsentSigned = isConsent && (Boolean(found) || Boolean(student.sha256Hash) || Boolean(student.signatureMetadata));
             const hasDoc = isConsent ? isConsentSigned : Boolean(found);
             const isMedical = type === 'medical';
+            const isInReview = isMedical && medStatus === 'in_review';
             const isExpiring = isMedical && medStatus === 'expiring';
             const isExpired = isMedical && medStatus === 'expired';
 
@@ -1688,7 +1970,9 @@ function DocumentiTab({
             let badgeComponent = null;
             if (hasDoc) {
               if (isMedical) {
-                if (medStatus === 'expired') {
+                if (isInReview) {
+                  badgeComponent = <Badge variant="warning" size="sm" dot>⏳ In Revisione</Badge>;
+                } else if (medStatus === 'expired') {
                   badgeComponent = <Badge variant="danger" size="sm" dot>Scaduto</Badge>;
                 } else if (medStatus === 'expiring') {
                   const days = getMedicalDaysRemaining();
@@ -1707,19 +1991,23 @@ function DocumentiTab({
               <div
                 key={type}
                 className={`flex items-center justify-between p-4 rounded-2xl border transition-colors ${hasDoc
-                    ? isExpired
-                      ? 'bg-coral-500/5 border-coral-500/20'
-                      : isExpiring
-                        ? 'bg-gold-500/5 border-gold-500/20'
-                        : 'bg-teal-500/5 border-teal-500/20'
+                    ? isInReview
+                      ? 'bg-amber-500/5 border-amber-500/20'
+                      : isExpired
+                        ? 'bg-coral-500/5 border-coral-500/20'
+                        : isExpiring
+                          ? 'bg-gold-500/5 border-gold-500/20'
+                          : 'bg-teal-500/5 border-teal-500/20'
                     : 'bg-white/[0.02] border-white/8'
                   }`}
               >
                 <div className="flex items-center gap-3">
                   <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${hasDoc
-                      ? isExpired ? 'bg-coral-500/20 text-coral-400'
-                        : isExpiring ? 'bg-gold-500/20 text-gold-400'
-                          : 'bg-teal-500/20 text-teal-400'
+                      ? isInReview
+                        ? 'bg-amber-500/20 text-amber-400'
+                        : isExpired ? 'bg-coral-500/20 text-coral-400'
+                          : isExpiring ? 'bg-gold-500/20 text-gold-400'
+                            : 'bg-teal-500/20 text-teal-400'
                       : 'bg-white/5 text-white/30'
                     }`}>
                     {icon}
@@ -1763,14 +2051,27 @@ function DocumentiTab({
                         <Button
                           variant="secondary"
                           size="sm"
-                          icon={<Download size={13} />}
+                          icon={<Eye size={13} />}
                           onClick={() => handleOpenStudentDocument(found || { id: 'consent', name: 'Modulo di Iscrizione', type: 'consent', fileURL: '', uploadedAt: student.updatedAt || student.createdAt || nowTimestamp() } as any)}
                         >
                           Apri
                         </Button>
                       )}
-                      <div className="w-6 h-6 rounded-full bg-teal-500/20 text-teal-400 flex items-center justify-center">
-                        <CheckCircle size={14} />
+                      {isMedical && isInReview && onApproveMedical && (
+                        <Button
+                          variant="primary"
+                          size="sm"
+                          icon={<CheckCircle size={13} />}
+                          onClick={() => onApproveMedical(found?.id)}
+                          className="bg-emerald-600 hover:bg-emerald-500 text-white"
+                        >
+                          Approva
+                        </Button>
+                      )}
+                      <div className={`w-6 h-6 rounded-full flex items-center justify-center ${
+                        isInReview ? 'bg-amber-500/20 text-amber-400' : 'bg-teal-500/20 text-teal-400'
+                      }`}>
+                        {isInReview ? <span className="text-xs">⏳</span> : <CheckCircle size={14} />}
                       </div>
                     </>
                   ) : (
@@ -1842,7 +2143,7 @@ function DocumentiTab({
                     </p>
                   </div>
                   {doc.fileURL && (
-                    <Button variant="secondary" size="sm" icon={<Download size={13} />}
+                    <Button variant="secondary" size="sm" icon={<Eye size={13} />}
                       onClick={() => handleOpenStudentDocument(doc)}>
                       Apri
                     </Button>
@@ -1930,7 +2231,379 @@ function DocumentiTab({
           </ModalFooter>
         </div>
       </Modal>
+
+      {/* MODAL: DOCUMENT PREVIEW */}
+      {previewDoc && (
+        <DocumentPreviewModal
+          isOpen={Boolean(previewDoc)}
+          onClose={() => setPreviewDoc(null)}
+          doc={previewDoc}
+          student={student}
+          onApprove={async () => {
+            if (onApproveMedical) {
+              await onApproveMedical(previewDoc.id);
+              setPreviewDoc(null);
+            }
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+// ─── Portal Invite Modal ──────────────────────────────────────────────────────
+interface PortalInviteModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  student: Student;
+  schoolId: string;
+  schoolName: string;
+  onSuccess: (parentUid: string, updatedContact?: Student['contact']) => void;
+}
+
+interface CompletedInviteState {
+  type: 'whatsapp' | 'email';
+  whatsappUrl?: string;
+  message?: string;
+  email: string;
+  phone?: string;
+  recipientName: string;
+}
+
+function PortalInviteModal({
+  isOpen,
+  onClose,
+  student,
+  schoolId,
+  schoolName,
+  onSuccess,
+}: PortalInviteModalProps) {
+  const age = calcAge(student.dateOfBirth);
+  const target = useMemo(() => resolvePortalTargetContact(student, age), [student, age]);
+
+  const [recipientName, setRecipientName] = useState(target.recipientName);
+  const [email, setEmail] = useState(target.email);
+  const [phone, setPhone] = useState(target.phone);
+  const [loading, setLoading] = useState(false);
+  const [completedInvite, setCompletedInvite] = useState<CompletedInviteState | null>(null);
+
+  useEffect(() => {
+    setRecipientName(target.recipientName);
+    setEmail(target.email);
+    setPhone(target.phone);
+    setCompletedInvite(null);
+  }, [target, isOpen]);
+
+  async function handleSendWhatsApp() {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPhone = phone.trim();
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      toast.error('Inserisci un indirizzo email valido prima di procedere.');
+      return;
+    }
+    if (!cleanPhone) {
+      toast.error('Inserisci un numero di cellulare per inviare il messaggio WhatsApp.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 1. Provision Auth user and link student + payments + persist contact in Firestore
+      const res = await provisionAndLinkPortalAccount({
+        student,
+        schoolId,
+        targetEmail: cleanEmail,
+        recipientName: recipientName.trim(),
+        phone: cleanPhone,
+        isMinor: target.isMinor,
+      });
+
+      // 2. Build activation link
+      const activationLink = buildPortalActivationUrl(cleanEmail);
+
+      // 3. Build WhatsApp text
+      const message = buildPortalInvitationWhatsAppMessage({
+        schoolName,
+        recipientName: recipientName.trim(),
+        studentName: `${student.firstName} ${student.lastName}`.trim(),
+        activationLink,
+      });
+
+      // 4. Background reset email as safety backup
+      try {
+        await sendPortalPasswordResetEmail(cleanEmail);
+      } catch (e) {
+        console.warn('[PortalInviteModal] Background password reset email:', e);
+      }
+
+      // 5. Build clean URL and attempt to open WhatsApp chat
+      const cleanDigits = cleanPhoneNumber(cleanPhone);
+      const whatsappUrl = `https://wa.me/${cleanDigits}?text=${encodeURIComponent(message)}`;
+      openWhatsAppChat(cleanPhone, message);
+
+      toast.success(
+        res.isNewAccount
+          ? 'Account creato e contatti salvati con successo!'
+          : 'Profilo collegato e contatti aggiornati!'
+      );
+      onSuccess(res.parentUid, res.updatedContact);
+
+      // Keep success state open in modal with unblockable direct link
+      setCompletedInvite({
+        type: 'whatsapp',
+        whatsappUrl,
+        message,
+        email: cleanEmail,
+        phone: cleanPhone,
+        recipientName: recipientName.trim(),
+      });
+    } catch (err: unknown) {
+      console.error('[PortalInviteModal] WhatsApp error:', err);
+      toast.error((err as Error)?.message || 'Errore durante la configurazione dell\'invito WhatsApp.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSendEmail() {
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanPhone = phone.trim();
+
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      toast.error('Inserisci un indirizzo email valido prima di procedere.');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // 1. Provision Auth user and link student + payments + persist contact in Firestore
+      const res = await provisionAndLinkPortalAccount({
+        student,
+        schoolId,
+        targetEmail: cleanEmail,
+        recipientName: recipientName.trim(),
+        phone: cleanPhone || undefined,
+        isMinor: target.isMinor,
+      });
+
+      // 2. Send official invitation / password reset email
+      await sendPortalPasswordResetEmail(cleanEmail);
+
+      toast.success(`Email di invito e attivazione inviata con successo a ${cleanEmail}!`);
+      onSuccess(res.parentUid, res.updatedContact);
+
+      setCompletedInvite({
+        type: 'email',
+        email: cleanEmail,
+        recipientName: recipientName.trim(),
+      });
+    } catch (err: unknown) {
+      console.error('[PortalInviteModal] Email error:', err);
+      toast.error((err as Error)?.message || 'Errore durante l\'invio dell\'email di invito.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Modal
+      isOpen={isOpen}
+      onClose={loading ? () => {} : onClose}
+      title="📱 Invia Credenziali Portale"
+      description="Configura l'accesso al Portale Genitori & Allievi per consultare ricevute fiscali, caricare certificati medici e visualizzare orari e presenze."
+    >
+      {completedInvite ? (
+        <div className="space-y-4 pt-2">
+          <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 flex items-start gap-3">
+            <CheckCircle size={22} className="shrink-0 text-emerald-400 mt-0.5" />
+            <div className="space-y-1 text-xs">
+              <p className="font-semibold text-sm text-white">
+                {completedInvite.type === 'whatsapp'
+                  ? 'Invito WhatsApp Pronto & Profilo Collegato!'
+                  : 'Email di Attivazione Inviata!'}
+              </p>
+              <p className="text-white/70">
+                L'account di accesso per <strong>{completedInvite.recipientName}</strong> ({completedInvite.email}) è stato configurato e associato a <strong>{student.firstName} {student.lastName}</strong>.
+              </p>
+              <p className="text-emerald-400 font-medium">
+                I dati di contatto sono stati salvati automaticamente nell'anagrafica allievo.
+              </p>
+            </div>
+          </div>
+
+          {completedInvite.type === 'whatsapp' && completedInvite.whatsappUrl && (
+            <div className="space-y-3 p-4 rounded-2xl bg-surface-800 border border-white/8">
+              <p className="text-xs text-white/70">
+                Se la chat WhatsApp non si è aperta automaticamente nella nuova scheda del browser:
+              </p>
+
+              <a
+                href={completedInvite.whatsappUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center justify-center gap-2 w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-sm transition-all shadow-lg shadow-emerald-900/30 text-center"
+              >
+                <MessageCircle size={16} />
+                👉 Clicca qui per aprire la chat di WhatsApp ({completedInvite.phone})
+              </a>
+
+              <div className="pt-2 flex justify-between items-center text-xs text-white/50 border-t border-white/8">
+                <span>Vuoi incollare il messaggio manualmente?</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  icon={<Copy size={13} />}
+                  onClick={() => {
+                    if (completedInvite.message) {
+                      navigator.clipboard.writeText(completedInvite.message);
+                      toast.success('Messaggio WhatsApp copiato negli appunti!');
+                    }
+                  }}
+                  className="border-white/10 text-white/80 hover:text-white hover:bg-white/5 shrink-0"
+                >
+                  Copia Messaggio
+                </Button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex justify-end pt-3">
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => {
+                setCompletedInvite(null);
+                onClose();
+              }}
+            >
+              Fatto / Chiudi
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-4 pt-2">
+          {/* Linkage status */}
+          <div
+            className={`p-3.5 rounded-2xl border flex items-center justify-between text-xs ${
+              student.parentId
+                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                : 'bg-amber-500/10 border-amber-500/20 text-amber-300'
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {student.parentId ? <CheckCircle size={16} /> : <AlertTriangle size={16} />}
+              <span>
+                {student.parentId
+                  ? `Account Portale già collegato (ID: ${student.parentId.slice(0, 8)}...)`
+                  : 'Account non ancora collegato: verrà associato automaticamente al primo invio.'}
+              </span>
+            </div>
+            <Badge variant={student.parentId ? 'success' : 'warning'}>
+              {student.parentId ? 'Collegato' : 'Da Attivare'}
+            </Badge>
+          </div>
+
+          {/* Missing Contact Notification Banner */}
+          {(!target.email || !target.phone) && (
+            <div className="p-3 rounded-xl bg-brand-500/10 border border-brand-500/20 text-xs text-brand-300 flex items-start gap-2">
+              <Info size={16} className="shrink-0 mt-0.5 text-brand-400" />
+              <span>
+                <strong>Contatti mancanti:</strong> Inserisci l'email e il cellulare qui sotto. Verranno salvati automaticamente anche nella scheda anagrafica di {student.firstName} {student.lastName}.
+              </span>
+            </div>
+          )}
+
+          {/* Target role badge */}
+          <div className="p-3 rounded-xl bg-surface-800 border border-white/8 text-xs text-white/70 flex items-center justify-between">
+            <span>Destinatario rilevato:</span>
+            <span className="font-semibold text-brand-300">
+              {target.isMinor ? 'Genitore / Tutore Legale (Minorenne)' : 'Allievo Diretto (Maggiorenne)'}
+            </span>
+          </div>
+
+          {/* Inputs */}
+          <div className="space-y-3">
+            <Input
+              label="Nome Destinatario"
+              placeholder="Nome e Cognome genitore o allievo"
+              value={recipientName}
+              onChange={(e) => setRecipientName(e.target.value)}
+              disabled={loading}
+              fullWidth
+            />
+
+            <Input
+              label="Email di Accesso (Obbligatoria)"
+              type="email"
+              placeholder="es. genitore@email.it"
+              icon={<Mail size={16} />}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              disabled={loading}
+              fullWidth
+              required
+              hint="Questa email sarà utilizzata come username di accesso al Portale e salvata in anagrafica."
+            />
+
+            <Input
+              label="Telefono Cellulare per WhatsApp"
+              type="tel"
+              placeholder="es. 3401234567"
+              icon={<Phone size={16} />}
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              disabled={loading}
+              fullWidth
+              hint="Necessario per l'invio dell'invito su WhatsApp (prefisso 39 aggiunto automaticamente)."
+            />
+          </div>
+
+          {/* Actions */}
+          <div className="pt-2 border-t border-white/8 space-y-2">
+            <p className="text-xs text-white/50 mb-2">Seleziona la modalità di invio:</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <Button
+                type="button"
+                variant="primary"
+                icon={<MessageCircle size={16} />}
+                onClick={handleSendWhatsApp}
+                loading={loading}
+                disabled={loading}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white w-full"
+              >
+                Invia Invito su WhatsApp
+              </Button>
+
+              <Button
+                type="button"
+                variant="secondary"
+                icon={<Mail size={16} />}
+                onClick={handleSendEmail}
+                loading={loading}
+                disabled={loading}
+                className="border-brand-500/40 text-brand-200 hover:bg-brand-500/20 w-full"
+              >
+                Invia Invito via Email
+              </Button>
+            </div>
+          </div>
+
+          {/* Modal footer */}
+          <div className="flex justify-end pt-2">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={onClose}
+              disabled={loading}
+            >
+              Chiudi
+            </Button>
+          </div>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -1945,7 +2618,8 @@ interface UploadModalProps {
     fileName: string,
     notes?: string,
     expiryDate?: Date,
-    isValidated?: boolean
+    isValidated?: boolean,
+    fileDataUrl?: string
   ) => Promise<StudentDocument | undefined>;
   onSuccess: () => void;
 }
@@ -1955,31 +2629,54 @@ function UploadDocumentModal({ isOpen, onClose, student, onUpload, onSuccess }: 
   const [fileName, setFileName] = useState('');
   const [notes, setNotes] = useState('');
   const [expiryDate, setExpiryDate] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
 
   async function handleSubmit() {
     if (!fileName.trim()) return;
     setLoading(true);
+    let dataUrl: string | undefined = undefined;
+
     try {
+      if (selectedFile) {
+        const compressed = await compressMedicalCertificate(selectedFile);
+        dataUrl = compressed.dataUrl;
+      }
+
       await onUpload(
         student.id,
         docType,
         fileName.trim(),
         notes.trim() || undefined,
         expiryDate ? new Date(expiryDate) : undefined,
-        true
+        true, // Staff validation is true by default
+        dataUrl
       );
       onSuccess();
-      setFileName(''); setNotes(''); setExpiryDate('');
+      setFileName('');
+      setNotes('');
+      setExpiryDate('');
+      setSelectedFile(null);
+    } catch (err: any) {
+      console.error(err);
+      toast.error(err.message || 'Errore durante il caricamento del documento.');
     } finally {
       setLoading(false);
     }
   }
 
+  function handleClose() {
+    setSelectedFile(null);
+    setFileName('');
+    setNotes('');
+    setExpiryDate('');
+    onClose();
+  }
+
   return (
     <Modal
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={handleClose}
       title="Carica Documento"
       description={`Registra un documento per ${student.firstName} ${student.lastName}`}
     >
@@ -1996,6 +2693,32 @@ function UploadDocumentModal({ isOpen, onClose, student, onUpload, onSuccess }: 
             { value: 'other', label: 'Altro' },
           ]}
         />
+
+        <div>
+          <label className="block text-xs font-semibold text-white/70 mb-1.5">
+            Allega File Reale (JPG, PNG o PDF)
+          </label>
+          <input
+            type="file"
+            accept=".pdf,.png,.jpg,.jpeg,image/*"
+            onChange={(e) => {
+              if (e.target.files && e.target.files[0]) {
+                const file = e.target.files[0];
+                setSelectedFile(file);
+                if (!fileName) {
+                  setFileName(file.name);
+                }
+              }
+            }}
+            disabled={loading}
+            className="w-full text-xs text-white/70 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-brand-600/30 file:text-brand-300 hover:file:bg-brand-600/50 cursor-pointer"
+          />
+          {selectedFile && (
+            <p className="text-[11px] text-brand-300 mt-1">
+              ✓ File selezionato: {selectedFile.name} ({(selectedFile.size / 1024).toFixed(0)} KB)
+            </p>
+          )}
+        </div>
 
         <Input
           label="Nome File / Documento"
@@ -2017,20 +2740,18 @@ function UploadDocumentModal({ isOpen, onClose, student, onUpload, onSuccess }: 
 
         <Input
           label="Note (opzionale)"
-          placeholder="Es. Originale consegnato in segreteria"
+          placeholder="Es. Originale cartaceo consegnato in segreteria"
           value={notes}
           onChange={(e) => setNotes(e.target.value)}
         />
 
-        {!STORAGE_ENABLED && (
-          <p className="text-xs text-gold-300/70 bg-gold-500/5 border border-gold-500/20 rounded-xl p-3">
-            ℹ Storage disabilitato: il documento verrà registrato con URL simulato.
-          </p>
-        )}
+        <p className="text-xs text-brand-300/80 bg-brand-500/5 border border-brand-500/20 rounded-xl p-3">
+          ℹ I file allegati vengono compressi direttamente nel browser (~150-200 KB) e memorizzati su Firestore per garantire anteprime istantanee senza costi cloud.
+        </p>
       </div>
 
       <ModalFooter>
-        <Button variant="secondary" onClick={onClose}>Annulla</Button>
+        <Button variant="secondary" onClick={handleClose}>Annulla</Button>
         <Button onClick={handleSubmit} loading={loading} disabled={!fileName.trim()}>
           Registra Documento
         </Button>

@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { writeBatch, doc, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { COLLECTIONS, paymentConverter, nowTimestamp } from '@/lib/converters';
-import { Card, Badge, Button, Input, Select, Modal, ModalFooter, EmptyState } from '@/components/ui';
+import { Card, Badge, Button, Input, Select, Textarea, Modal, ModalFooter, EmptyState } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { PaymentForm } from '@/components/payments/PaymentForm';
 import { QuickPaymentModal } from '@/components/payments/QuickPaymentModal';
@@ -25,6 +25,7 @@ import {
   TrendingUp,
   Clock,
   Download,
+  Printer,
   CheckCircle,
   BellRing,
   Edit,
@@ -50,7 +51,8 @@ export default function PaymentsPage() {
     deleteInstallment,
     emitInstallmentReceipt,
     cancelPayment,
-    deletePayment
+    deletePayment,
+    updateReceiptPayment,
   } = usePayments();
 
   const [activeTab, setActiveTab] = useState<'all' | 'overdue'>('all');
@@ -111,6 +113,66 @@ export default function PaymentsPage() {
       setPayAsFullSettlement(false);
     }
   }, [payingPayment]);
+
+  // Edit Receipt Modal State (Strictly preserves existing receipt number)
+  const [editingReceiptPayment, setEditingReceiptPayment] = useState<Payment | null>(null);
+  const [editReceiptMethod, setEditReceiptMethod] = useState<PaymentMethod>('cash');
+  const [editReceiptDate, setEditReceiptDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [editReceiptDescription, setEditReceiptDescription] = useState<string>('');
+  const [editReceiptMonth, setEditReceiptMonth] = useState<number>(new Date().getMonth() + 1);
+  const [editReceiptYear, setEditReceiptYear] = useState<number>(new Date().getFullYear());
+  const [editReceiptAmount, setEditReceiptAmount] = useState<number>(0);
+  const [editReceiptNotes, setEditReceiptNotes] = useState<string>('');
+  const [isSubmittingEditReceipt, setIsSubmittingEditReceipt] = useState<boolean>(false);
+
+  const handleOpenEditReceipt = (payment: Payment) => {
+    setEditingReceiptPayment(payment);
+    setEditReceiptMethod(payment.method || 'cash');
+    setEditReceiptDate(
+      payment.paidAt
+        ? format(payment.paidAt.toDate(), 'yyyy-MM-dd')
+        : new Date().toISOString().split('T')[0]
+    );
+    setEditReceiptDescription(payment.description || '');
+    setEditReceiptMonth(payment.month ?? (new Date().getMonth() + 1));
+    setEditReceiptYear(payment.year ?? new Date().getFullYear());
+    setEditReceiptAmount(payment.paidAmount ?? payment.amount ?? 0);
+    setEditReceiptNotes(payment.notes || '');
+  };
+
+  const handleSaveEditReceipt = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!editingReceiptPayment) return;
+
+    if (editReceiptAmount <= 0) {
+      toast.error('L\'importo della ricevuta deve essere maggiore di zero.');
+      return;
+    }
+    if (!editReceiptDescription.trim()) {
+      toast.error('La causale / descrizione della ricevuta è obbligatoria.');
+      return;
+    }
+
+    try {
+      setIsSubmittingEditReceipt(true);
+      await updateReceiptPayment(editingReceiptPayment.id, {
+        method: editReceiptMethod,
+        paidAt: new Date(editReceiptDate),
+        dueDate: new Date(editReceiptDate),
+        description: editReceiptDescription.trim(),
+        month: editReceiptMonth,
+        year: editReceiptYear,
+        amount: Number(editReceiptAmount),
+        notes: editReceiptNotes.trim() || undefined,
+      });
+      toast.success(`Ricevuta N° ${editingReceiptPayment.receiptNumber} aggiornata con successo (numero conservato)`);
+      setEditingReceiptPayment(null);
+    } catch (err) {
+      console.error('[PaymentsPage] handleSaveEditReceipt error:', err);
+    } finally {
+      setIsSubmittingEditReceipt(false);
+    }
+  };
 
   const handleDeletePayment = async (paymentId: string) => {
     if (confirm('Sei sicuro di voler eliminare definitivamente questo addebito/pagamento? L\'azione è irreversibile.')) {
@@ -213,16 +275,79 @@ export default function PaymentsPage() {
     return resolvedPayments.filter((p) => {
       const student = students.find(s => s.id === p.studentId);
       const studentName = student ? `${student.firstName} ${student.lastName}`.toLowerCase() : '';
-      
+
       const isSearching = searchQuery.trim().length > 0;
-      const matchesSearch = !isSearching || 
-                            studentName.includes(searchQuery.toLowerCase()) || 
-                            p.description.toLowerCase().includes(searchQuery.toLowerCase());
-      
-      const matchesStatus = statusFilter === 'all' ? true : p.status === statusFilter;
-      const matchesCourse = courseFilter === 'all' ? true : p.courseId === courseFilter;
-      // When searching, search across all months so the search is not obstructed by the month filter
-      const matchesMonth = (isSearching || monthFilter === 0) ? true : p.month === monthFilter;
+      const q = searchQuery.toLowerCase().trim();
+      const qDigits = q.replace(/\D/g, '');
+      const isReceiptQuery = /ricevuta|n°|n\.|\bric\b|#/i.test(q);
+
+      // Collect all receipt references on payment and installments
+      const receiptNums: string[] = [];
+      if (p.receiptNumber !== undefined && p.receiptNumber !== null) {
+        receiptNums.push(String(p.receiptNumber).trim());
+      }
+      if (p.payments && Array.isArray(p.payments)) {
+        p.payments.forEach((inst) => {
+          if (inst.receiptUrl) {
+            const match = inst.receiptUrl.match(/(\d+)/);
+            if (match) receiptNums.push(match[1]);
+            const lastPart = inst.receiptUrl.split('/').pop();
+            if (lastPart) receiptNums.push(lastPart.trim());
+          }
+          const rawInst = inst as unknown as Record<string, unknown>;
+          if (rawInst.receiptNumber) {
+            receiptNums.push(String(rawInst.receiptNumber).trim());
+          }
+        });
+      }
+
+      const matchesReceipt = receiptNums.some((r) => {
+        if (!r) return false;
+        const rLower = r.toLowerCase();
+
+        // 1. Direct contains (e.g. typing "142" matches receipt "142")
+        if (rLower.includes(q)) return true;
+
+        // 2. Formatted variants: "ricevuta 142", "ricevuta n° 142", "ricevuta n. 142", "n° 142", etc.
+        const formattedVariants = [
+          `ricevuta ${rLower}`,
+          `ricevuta n° ${rLower}`,
+          `ricevuta n. ${rLower}`,
+          `ricevuta n ${rLower}`,
+          `ricevuta n°${rLower}`,
+          `n° ${rLower}`,
+          `n. ${rLower}`,
+          `#${rLower}`,
+        ];
+        const matchesVariant = formattedVariants.some(
+          (v) => q.includes(v) || (qDigits.length > 0 && v.includes(q))
+        );
+        if (matchesVariant) return true;
+
+        // 3. Receipt prefix query with digits (e.g. "ricevuta n. 142")
+        if (isReceiptQuery && qDigits && (rLower === qDigits || rLower.includes(qDigits))) {
+          return true;
+        }
+
+        // 4. Pure numeric query matching receipt number
+        if (qDigits && q === qDigits && (rLower === qDigits || rLower.includes(qDigits))) {
+          return true;
+        }
+
+        return false;
+      });
+
+      const matchesSearch =
+        !isSearching ||
+        studentName.includes(q) ||
+        p.description.toLowerCase().includes(q) ||
+        matchesReceipt;
+
+      // When matching a receipt specifically, bypass month, course, and status filters
+      // so typing a receipt number immediately surfaces the receipt anywhere across all payments
+      const matchesStatus = (matchesReceipt || statusFilter === 'all') ? true : p.status === statusFilter;
+      const matchesCourse = (matchesReceipt || courseFilter === 'all') ? true : p.courseId === courseFilter;
+      const matchesMonth = (matchesReceipt || isSearching || monthFilter === 0) ? true : p.month === monthFilter;
 
       return matchesSearch && matchesStatus && matchesCourse && matchesMonth;
     });
@@ -713,7 +838,7 @@ export default function PaymentsPage() {
             <Card className='p-4'>
               <div className='grid grid-cols-1 md:grid-cols-4 gap-3'>
                 <Input
-                  placeholder='Cerca allievo...'
+                  placeholder='Cerca allievo o N° ricevuta (es. 142)...'
                   icon={<Search size={16} />}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
@@ -946,6 +1071,13 @@ export default function PaymentsPage() {
                           <td className='py-3.5 px-5'>
                             <p className="text-white/90">{p.description}</p>
                             {p.courseId && <p className="text-xs text-white/40">{courses.find(c => c.id === p.courseId)?.name}</p>}
+                            {p.receiptNumber && (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-semibold bg-gold-500/10 text-gold-300 border border-gold-500/20">
+                                  Ricevuta N° {p.receiptNumber}
+                                </span>
+                              </div>
+                            )}
                           </td>
                           <td className='py-3.5 px-5 font-bold text-white'>
                             <div>
@@ -984,14 +1116,28 @@ export default function PaymentsPage() {
                                   </Button>
                                 </>
                               )}
-                              {(p.status === 'paid' || p.status === 'deposit_paid') && (p.receiptURL || p.receiptNumber) && (
+                              {(p.receiptNumber || ((p.status === 'paid' || p.status === 'deposit_paid') && p.receiptURL)) && (
                                 <Button
                                   variant="secondary"
                                   size="sm"
                                   onClick={() => handleDownloadReceipt(p)}
-                                  icon={<Download size={14} />}
+                                  icon={<Printer size={14} />}
+                                  title={p.receiptNumber ? `Ristampa Ricevuta N° ${p.receiptNumber}` : 'Scarica Ricevuta PDF'}
+                                  className="border border-gold-500/30 text-gold-300 hover:bg-gold-500/10"
                                 >
-                                  PDF
+                                  Ristampa PDF
+                                </Button>
+                              )}
+                              {p.receiptNumber && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  onClick={() => handleOpenEditReceipt(p)}
+                                  icon={<Edit size={14} />}
+                                  title={`Modifica Ricevuta N° ${p.receiptNumber} (mantiene il numero)`}
+                                  className="border-brand-500/30 text-brand-300 hover:bg-brand-500/10"
+                                >
+                                  Modifica Ricevuta
                                 </Button>
                               )}
                               <Button
@@ -1253,6 +1399,40 @@ export default function PaymentsPage() {
                 </div>
               </div>
 
+              {managedPayment.receiptNumber && (
+                <div className="p-3.5 rounded-xl bg-gold-500/10 border border-gold-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded text-xs font-bold bg-gold-500/20 text-gold-300">
+                      Ricevuta N° {managedPayment.receiptNumber}
+                    </span>
+                    <span className="text-xs text-gold-200/70">Ricevuta fiscale associata</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="border border-gold-500/30 text-gold-300 hover:bg-gold-500/10"
+                      onClick={() => handleDownloadReceipt(managedPayment)}
+                      icon={<Printer size={14} />}
+                    >
+                      Ristampa PDF
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-brand-500/30 text-brand-300 hover:bg-brand-500/10"
+                      onClick={() => {
+                        handleOpenEditReceipt(managedPayment);
+                        setSelectedManagePayment(null);
+                      }}
+                      icon={<Edit size={14} />}
+                    >
+                      Modifica Ricevuta
+                    </Button>
+                  </div>
+                </div>
+              )}
+
               {(managedPayment.status === 'pending' || managedPayment.status === 'deposit_paid' || managedPayment.status === 'overdue') && (
                 <Button
                   className="w-full"
@@ -1323,10 +1503,12 @@ export default function PaymentsPage() {
                             <Button
                               size="xs"
                               variant="outline"
-                              icon={<Download size={12} />}
+                              className="border-gold-500/30 text-gold-300 hover:bg-gold-500/10"
+                              icon={<Printer size={12} />}
                               onClick={() => handleDownloadReceipt(managedPayment, inst)}
+                              title="Ristampa Ricevuta PDF"
                             >
-                              Ricevuta
+                              Ristampa PDF
                             </Button>
                           ) : (
                             managedPayment.status !== 'cancelled' && (
@@ -1589,6 +1771,116 @@ export default function PaymentsPage() {
           }}
           initialStudentId={quickStudentId}
         />
+
+        {/* MODAL: MODIFICA RICEVUTA (CONSERVA NUMERO ORIGINALE) */}
+        <Modal
+          isOpen={!!editingReceiptPayment}
+          onClose={() => setEditingReceiptPayment(null)}
+          title="Modifica Ricevuta"
+          description="Modifica i dati contabili o fiscali della ricevuta. Il numero progressivo della ricevuta originale verrà rigorosamente mantenuto."
+        >
+          {editingReceiptPayment && (
+            <form onSubmit={handleSaveEditReceipt} className="space-y-4">
+              {/* Highlighted read-only badge for immutable receipt number */}
+              <div className="p-3.5 rounded-xl bg-gold-500/10 border border-gold-500/30 flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-gold-500/20 text-gold-300 flex items-center justify-center font-bold text-base shrink-0">
+                  #{editingReceiptPayment.receiptNumber}
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-gold-400 block">Numero Ricevuta Immutabile</span>
+                  <p className="text-sm font-semibold text-gold-200">
+                    Ricevuta N° {editingReceiptPayment.receiptNumber} — Il numero progressivo rimane invariato
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Select
+                  label="Metodo di Pagamento"
+                  value={editReceiptMethod}
+                  onChange={(e) => setEditReceiptMethod(e.target.value as PaymentMethod)}
+                  options={[
+                    { value: 'cash', label: 'Contanti' },
+                    { value: 'bank_transfer', label: 'Bonifico Bancario' },
+                    { value: 'card', label: 'Carta di Credito / POS' },
+                    { value: 'stripe', label: 'Stripe Online' },
+                    { value: 'other', label: 'Altro' },
+                  ]}
+                />
+
+                <Input
+                  label="Data Pagamento / Ricevuta"
+                  type="date"
+                  value={editReceiptDate}
+                  onChange={(e) => setEditReceiptDate(e.target.value)}
+                  required
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <Input
+                  label="Importo (€)"
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  value={editReceiptAmount}
+                  onChange={(e) => setEditReceiptAmount(Number(e.target.value))}
+                  required
+                />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <Select
+                    label="Mese"
+                    value={String(editReceiptMonth)}
+                    onChange={(e) => setEditReceiptMonth(Number(e.target.value))}
+                    options={ITALIAN_MONTHS.map((m, i) => ({ value: String(i + 1), label: m }))}
+                  />
+                  <Input
+                    label="Anno"
+                    type="number"
+                    value={editReceiptYear}
+                    onChange={(e) => setEditReceiptYear(Number(e.target.value))}
+                    required
+                  />
+                </div>
+              </div>
+
+              <Input
+                label="Causale / Descrizione Ricevuta"
+                value={editReceiptDescription}
+                onChange={(e) => setEditReceiptDescription(e.target.value)}
+                placeholder="Es. Quota mensile Novembre 2026 - Salsa Cubana"
+                required
+              />
+
+              <Textarea
+                label="Note Contabili (opzionale)"
+                value={editReceiptNotes}
+                onChange={(e) => setEditReceiptNotes(e.target.value)}
+                placeholder="Eventuali annotazioni per la segreteria o l'allievo..."
+                rows={2}
+              />
+
+              <ModalFooter>
+                <Button 
+                  type="button" 
+                  variant="secondary" 
+                  onClick={() => setEditingReceiptPayment(null)}
+                  disabled={isSubmittingEditReceipt}
+                >
+                  Annulla
+                </Button>
+                <Button 
+                  type="submit" 
+                  loading={isSubmittingEditReceipt}
+                  className="bg-brand-500 hover:bg-brand-600 text-white font-medium"
+                >
+                  Salva Modifiche Ricevuta
+                </Button>
+              </ModalFooter>
+            </form>
+          )}
+        </Modal>
       </div>
     </ErrorBoundary>
   );

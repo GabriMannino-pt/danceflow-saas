@@ -130,11 +130,12 @@ export function useStudents() {
             studentId: newStudent.id,
             firstName: newStudent.firstName,
             lastName: newStudent.lastName,
-            status: 'active',
+            studentName: `${newStudent.firstName} ${newStudent.lastName}`.trim(),
+            status: 'registered',
             updatedAt: nowTimestamp(),
           }, { merge: true });
         } catch (cfErr) {
-          console.warn('[useStudents] Error indexing CF on create:', cfErr);
+          console.warn('[useStudents] CF index operation skipped or restricted on create:', cfErr);
         }
       }
 
@@ -169,22 +170,26 @@ export function useStudents() {
         const currentStudent = students.find((s) => s.id === studentId);
         const oldCF = currentStudent?.fiscalCode?.trim().toUpperCase();
 
-        try {
-          if (oldCF && oldCF !== cleanNewCF) {
-            await deleteDoc(doc(db, 'schools', schoolId, 'fiscalCodesIndex', oldCF));
+        // Evita re-indicizzazione se il CF non è cambiato
+        if (cleanNewCF !== oldCF) {
+          try {
+            if (oldCF) {
+              await deleteDoc(doc(db, 'schools', schoolId, 'fiscalCodesIndex', oldCF));
+            }
+            if (cleanNewCF) {
+              const cfRef = doc(db, 'schools', schoolId, 'fiscalCodesIndex', cleanNewCF);
+              await setDoc(cfRef, {
+                studentId,
+                firstName: updates.firstName || currentStudent?.firstName || '',
+                lastName: updates.lastName || currentStudent?.lastName || '',
+                studentName: `${updates.firstName || currentStudent?.firstName || ''} ${updates.lastName || currentStudent?.lastName || ''}`.trim(),
+                status: 'registered',
+                updatedAt: nowTimestamp(),
+              }, { merge: true });
+            }
+          } catch (cfErr) {
+            console.warn('[useStudents] CF index operation skipped or restricted on edit:', cfErr);
           }
-          if (cleanNewCF) {
-            const cfRef = doc(db, 'schools', schoolId, 'fiscalCodesIndex', cleanNewCF);
-            await setDoc(cfRef, {
-              studentId,
-              firstName: updates.firstName || currentStudent?.firstName || '',
-              lastName: updates.lastName || currentStudent?.lastName || '',
-              status: 'active',
-              updatedAt: nowTimestamp(),
-            }, { merge: true });
-          }
-        } catch (cfErr) {
-          console.warn('[useStudents] Error updating CF index on edit:', cfErr);
         }
       }
 
@@ -192,7 +197,8 @@ export function useStudents() {
       toast.success('Dati allievo aggiornati!');
     } catch (err) {
       console.error('[useStudents] edit error:', err);
-      toast.error('Impossibile aggiornare i dati.');
+      const msg = (err as Error)?.message;
+      toast.error(msg ? `Impossibile aggiornare i dati: ${msg}` : 'Impossibile aggiornare i dati.');
       throw err;
     } finally {
       setLoading(false);
@@ -220,7 +226,7 @@ export function useStudents() {
           const oldCF = currentStudent.fiscalCode.trim().toUpperCase();
           await deleteDoc(doc(db, 'schools', schoolId, 'fiscalCodesIndex', oldCF));
         } catch (cfErr) {
-          console.warn('[useStudents] Error deleting CF index on delete:', cfErr);
+          console.warn('[useStudents] CF index operation skipped or restricted on delete:', cfErr);
         }
       }
 
@@ -310,7 +316,8 @@ export function useStudents() {
     fileName: string,
     notes?: string,
     expiryDate?: Date,
-    isValidated: boolean = false
+    isValidated: boolean = false,
+    fileDataUrl?: string
   ) {
     if (!schoolId) throw new Error('Not authenticated');
     setLoading(true);
@@ -320,33 +327,49 @@ export function useStudents() {
       if (!studentSnap.exists()) throw new Error('Student not found');
       const student = studentSnap.data();
 
-      // 1. Generate mock URL (or real if storage was configured, but STORAGE_ENABLED = false)
+      // 1. Generate doc ID and set URL directly to fileDataUrl when provided
       const docId = doc(collection(db, 'placeholder')).id;
-      const mockUrl = `https://example.com/mock-upload/schools/${schoolId}/students/${studentId}/${docType}/${docId}_${fileName}`;
+      const fileUrl = fileDataUrl || `https://example.com/mock-upload/schools/${schoolId}/students/${studentId}/${docType}/${docId}_${fileName}`;
 
       const newDoc: StudentDocument = {
         id: docId,
         name: fileName,
         type: docType,
-        fileURL: mockUrl,
+        fileURL: fileUrl,
         uploadedAt: nowTimestamp(),
         notes: notes || undefined,
+        isValidated,
       };
 
-      // 2. Prepare updates
-      const updatedDocs = [...(student.documents || []), newDoc];
+      // 2. Prepare updates (replace prior medical document to prevent unbounded Firestore size)
+      let currentDocs = student.documents || [];
+      if (docType === 'medical') {
+        const existingIdx = currentDocs.findIndex((d) => d.type === 'medical');
+        if (existingIdx >= 0) {
+          currentDocs = [
+            ...currentDocs.slice(0, existingIdx),
+            newDoc,
+            ...currentDocs.slice(existingIdx + 1),
+          ];
+        } else {
+          currentDocs = [...currentDocs, newDoc];
+        }
+      } else {
+        currentDocs = [...currentDocs, newDoc];
+      }
+
       const updates: Partial<Student> = {
-        documents: updatedDocs,
+        documents: currentDocs,
         updatedAt: nowTimestamp(),
       };
 
       // If medical cert is uploaded, also update the medicalInfo fields
       if (docType === 'medical') {
-        const medicalExpiry = expiryDate ? toTimestamp(expiryDate) : undefined;
+        const medicalExpiry = expiryDate ? toTimestamp(expiryDate) : student.medicalInfo?.medicalClearanceExpiry;
         updates.medicalInfo = {
           ...student.medicalInfo,
           medicalClearance: isValidated,
-          medicalClearanceExpiry: medicalExpiry,
+          ...(medicalExpiry ? { medicalClearanceExpiry: medicalExpiry } : {}),
         };
       }
 
@@ -367,6 +390,59 @@ export function useStudents() {
     }
   }
 
+  // ─── Approve Medical Certificate ───────────────────────────────────────────
+  async function approveMedicalCertificate(
+    studentId: string,
+    docId?: string,
+    expiryDate?: Date
+  ) {
+    if (!schoolId) throw new Error('Not authenticated');
+    setLoading(true);
+    try {
+      const studentRef = doc(db, COLLECTIONS.students(schoolId), studentId).withConverter(studentConverter);
+      const studentSnap = await getDoc(studentRef);
+      if (!studentSnap.exists()) throw new Error('Student not found');
+      const student = studentSnap.data();
+
+      // 1. Mark medical document as validated
+      const updatedDocs = (student.documents || []).map((d) => {
+        if (docId ? d.id === docId : d.type === 'medical') {
+          return { ...d, isValidated: true };
+        }
+        return d;
+      });
+
+      // 2. Prepare medicalInfo update
+      const medicalExpiry = expiryDate
+        ? toTimestamp(expiryDate)
+        : student.medicalInfo?.medicalClearanceExpiry;
+
+      const updates: Partial<Student> = {
+        documents: updatedDocs,
+        medicalInfo: {
+          ...student.medicalInfo,
+          medicalClearance: true,
+          ...(medicalExpiry ? { medicalClearanceExpiry: medicalExpiry } : {}),
+        },
+        updatedAt: nowTimestamp(),
+      };
+
+      // 3. Save to Firestore
+      await updateDoc(studentRef, removeUndefined(updates));
+
+      // 4. Update Zustand Store
+      storeUpdateStudent(studentId, updates);
+
+      toast.success('Certificato medico approvato con successo!');
+    } catch (err) {
+      console.error('[useStudents] approveMedicalCertificate error:', err);
+      toast.error('Impossibile approvare il certificato medico.');
+      throw err;
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return {
     students,
     loading,
@@ -376,5 +452,6 @@ export function useStudents() {
     deleteStudent,
     sendDocumentReminder,
     uploadStudentDocument,
+    approveMedicalCertificate,
   };
 }

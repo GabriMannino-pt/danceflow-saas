@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react';
-import { useForm, useWatch } from 'react-hook-form';
+import { useForm, useWatch, type Resolver } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { useStudents } from '@/hooks/useStudents';
@@ -11,103 +11,109 @@ import { Modal, ModalFooter, Input, Textarea, Select, Button } from '@/component
 import { toTimestamp } from '@/lib/converters';
 import type { Student } from '@/types';
 
-const studentFormSchema = z
-  .object({
-    firstName: z.string().min(2, 'Il nome deve essere di almeno 2 caratteri'),
-    lastName: z.string().min(2, 'Il cognome deve essere di almeno 2 caratteri'),
-    dateOfBirth: z.string().refine((val) => !isNaN(Date.parse(val)), 'Inserisci una data valida'),
-    fiscalCode: z
-      .string()
-      .optional()
-      .refine((val) => {
-        if (!val || val === '') return true;
-        return /^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/i.test(val);
-      }, 'Formato Codice Fiscale non valido (16 caratteri alfanumerici)'),
-    gender: z.enum(['M', 'F', 'Other']),
-    address: z.object({
-      street: z.string().optional(),
-      city: z.string().optional(),
-      province: z.string().optional(),
-      postalCode: z.string().optional(),
-      country: z.string().optional(),
-    }),
-    contact: z.object({
-      studentPhone: z.string().optional(),
-      studentEmail: z.string().optional(),
-      parentName: z.string().optional(),
-      parentPhone: z.string().optional(),
-      parentEmail: z.string().optional(),
-      parentRelation: z.enum(['madre', 'padre', 'tutore', 'altro', '']).optional(),
-      emergencyContact: z.string().optional().or(z.literal('')),
-      emergencyPhone: z.string().optional().or(z.literal('')),
-    }),
-    medicalInfo: z.object({
-      allergies: z.string().optional(),
-      conditions: z.string().optional(),
-      medications: z.string().optional(),
-      medicalClearance: z.boolean().default(false),
-      medicalClearanceExpiry: z.string().optional(),
-    }),
-    notes: z.string().optional(),
-    isActive: z.boolean().default(true),
-  })
-  .superRefine((data, ctx) => {
-    // ─── Age calculation ───
-    if (data.dateOfBirth) {
-      const dob = new Date(data.dateOfBirth);
-      const today = new Date();
-      let age = today.getFullYear() - dob.getFullYear();
-      const m = today.getMonth() - dob.getMonth();
-      if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
-        age--;
+const getStudentFormSchema = (isEditing: boolean = false) =>
+  z
+    .object({
+      firstName: z.string().min(2, 'Il nome deve essere di almeno 2 caratteri'),
+      lastName: z.string().min(2, 'Il cognome deve essere di almeno 2 caratteri'),
+      dateOfBirth: z.string().refine((val) => {
+        if (isEditing && (!val || val.trim() === '')) return true;
+        return !isNaN(Date.parse(val));
+      }, 'Inserisci una data valida'),
+      fiscalCode: z
+        .string()
+        .optional()
+        .refine((val) => {
+          if (!val || val === '') return true;
+          return /^[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]$/i.test(val);
+        }, 'Formato Codice Fiscale non valido (16 caratteri alfanumerici)'),
+      gender: z.enum(['M', 'F', 'Other']),
+      address: z.object({
+        street: z.string().optional(),
+        city: z.string().optional(),
+        province: z.string().optional(),
+        postalCode: z.string().optional(),
+        country: z.string().optional(),
+      }),
+      contact: z.object({
+        studentPhone: z.string().optional(),
+        studentEmail: z.string().trim().email('Inserisci un indirizzo email valido').optional().or(z.literal('')),
+        parentName: z.string().optional(),
+        parentPhone: z.string().optional(),
+        parentEmail: z.string().trim().email('Inserisci un indirizzo email valido').optional().or(z.literal('')),
+        parentRelation: z.enum(['madre', 'padre', 'tutore', 'altro', '']).optional(),
+        emergencyContact: z.string().optional().or(z.literal('')),
+        emergencyPhone: z.string().optional().or(z.literal('')),
+      }),
+      medicalInfo: z.object({
+        allergies: z.string().optional(),
+        conditions: z.string().optional(),
+        medications: z.string().optional(),
+        medicalClearance: z.boolean().default(false),
+        medicalClearanceExpiry: z.string().optional(),
+      }),
+      notes: z.string().optional(),
+      isActive: z.boolean().default(true),
+    })
+    .superRefine((data, ctx) => {
+      // ─── Age calculation ───
+      if (data.dateOfBirth) {
+        const dob = new Date(data.dateOfBirth);
+        const today = new Date();
+        let age = today.getFullYear() - dob.getFullYear();
+        const m = today.getMonth() - dob.getMonth();
+        if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) {
+          age--;
+        }
+
+        // If minor (< 18), require parent info ONLY on initial registration (not when editing existing student)
+        if (age < 18 && !isEditing) {
+          if (!data.contact.parentName || data.contact.parentName.trim() === '') {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'Il nome del genitore è obbligatorio per i minorenni',
+              path: ['contact', 'parentName'],
+            });
+          }
+          if (!data.contact.parentPhone || data.contact.parentPhone.trim() === '') {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'Il telefono del genitore è obbligatorio per i minorenni',
+              path: ['contact', 'parentPhone'],
+            });
+          }
+          if (!data.contact.parentEmail || data.contact.parentEmail.trim() === '') {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: "L'email del genitore è obbligatoria per i minorenni",
+              path: ['contact', 'parentEmail'],
+            });
+          }
+          if (!data.contact.parentRelation) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: 'La relazione di parentela è obbligatoria per i minorenni',
+              path: ['contact', 'parentRelation'],
+            });
+          }
+        }
       }
 
-      // If minor (< 18), require parent info
-      if (age < 18) {
-        if (!data.contact.parentName || data.contact.parentName.trim() === '') {
+      // ─── Medical clearance expiry ───
+      // On new registrations require expiry date if clearance is marked true.
+      // On editing, allow saving without blocking general edits for legacy records.
+      if (data.medicalInfo.medicalClearance && !isEditing) {
+        if (!data.medicalInfo.medicalClearanceExpiry || data.medicalInfo.medicalClearanceExpiry === '') {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: 'Il nome del genitore è obbligatorio per i minorenni',
-            path: ['contact', 'parentName'],
-          });
-        }
-        if (!data.contact.parentPhone || data.contact.parentPhone.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'Il telefono del genitore è obbligatorio per i minorenni',
-            path: ['contact', 'parentPhone'],
-          });
-        }
-        if (!data.contact.parentEmail || data.contact.parentEmail.trim() === '') {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: "L'email del genitore è obbligatoria per i minorenni",
-            path: ['contact', 'parentEmail'],
-          });
-        }
-        if (!data.contact.parentRelation) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: 'La relazione di parentela è obbligatoria per i minorenni',
-            path: ['contact', 'parentRelation'],
+            message: 'La data di scadenza del certificato medico è obbligatoria',
+            path: ['medicalInfo', 'medicalClearanceExpiry'],
           });
         }
       }
-    }
+    });
 
-    // ─── Medical clearance expiry ───
-    if (data.medicalInfo.medicalClearance) {
-      if (!data.medicalInfo.medicalClearanceExpiry || data.medicalInfo.medicalClearanceExpiry === '') {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'La data di scadenza del certificato medico è obbligatoria',
-          path: ['medicalInfo', 'medicalClearanceExpiry'],
-        });
-      }
-    }
-  });
-
-type StudentFormValues = z.infer<typeof studentFormSchema>;
+type StudentFormValues = z.infer<ReturnType<typeof getStudentFormSchema>>;
 
 interface StudentFormProps {
   isOpen: boolean;
@@ -157,6 +163,9 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
     isActive: student?.isActive ?? true,
   };
 
+  const isEditing = Boolean(student);
+  const formSchema = useMemo(() => getStudentFormSchema(isEditing), [isEditing]);
+
   const {
     register,
     handleSubmit,
@@ -164,7 +173,7 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
     reset,
     formState: { errors, isSubmitting },
   } = useForm<StudentFormValues>({
-    resolver: zodResolver(studentFormSchema) as any,
+    resolver: zodResolver(formSchema) as Resolver<StudentFormValues>,
     defaultValues,
   });
 
@@ -205,7 +214,37 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
     if (isOpen) {
       reset(defaultValues);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [student, isOpen]);
+
+  // ─── Error Handler (Zod validation failure) ──────────────────────────────────
+  function onError(formEl?: HTMLElement | null) {
+    toast.error('Attenzione: compila i campi obbligatori evidenziati');
+
+    setTimeout(() => {
+      const container = formEl || document.querySelector('form');
+      if (!container) return;
+
+      const invalidEl = container.querySelector<HTMLElement>(
+        'input[aria-invalid="true"], select[aria-invalid="true"], textarea[aria-invalid="true"], [aria-invalid="true"], .border-coral-500, [role="alert"]'
+      );
+
+      if (invalidEl) {
+        const target =
+          invalidEl.tagName === 'INPUT' || invalidEl.tagName === 'SELECT' || invalidEl.tagName === 'TEXTAREA'
+            ? invalidEl
+            : invalidEl.closest('div')?.querySelector<HTMLElement>('input, select, textarea') || invalidEl;
+
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.focus?.({ preventScroll: true });
+
+        target.classList.add('ring-2', 'ring-coral-500', 'border-coral-500');
+        setTimeout(() => {
+          target.classList.remove('ring-2', 'ring-coral-500', 'border-coral-500');
+        }, 3000);
+      }
+    }, 60);
+  }
 
   // ─── Submit Form ────────────────────────────────────────────────────────────
   async function onSubmit(data: StudentFormValues) {
@@ -227,8 +266,12 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
             if (cfSnap.exists()) {
               const cfData = cfSnap.data();
               if (cfData.studentId && cfData.studentId !== student?.id) {
+                const existingName =
+                  cfData.studentName ||
+                  `${cfData.lastName?.toUpperCase() || ''} ${cfData.firstName?.toUpperCase() || ''}`.trim() ||
+                  'un allievo';
                 toast.error(
-                  `Codice Fiscale già registrato presso la scuola per ${cfData.lastName?.toUpperCase() || ''} ${cfData.firstName?.toUpperCase() || ''}.`
+                  `Codice Fiscale già registrato presso la scuola per ${existingName}.`
                 );
                 return;
               }
@@ -241,7 +284,9 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
       const studentData: Omit<Student, 'id' | 'schoolId' | 'createdAt' | 'updatedAt'> = {
         firstName: data.firstName.trim(),
         lastName: data.lastName.trim(),
-        dateOfBirth: toTimestamp(new Date(data.dateOfBirth)),
+        dateOfBirth: data.dateOfBirth && !isNaN(Date.parse(data.dateOfBirth))
+          ? toTimestamp(new Date(data.dateOfBirth))
+          : (student?.dateOfBirth || toTimestamp(new Date())),
         fiscalCode: data.fiscalCode?.trim().toUpperCase() || undefined,
         gender: data.gender,
         isActive: data.isActive,
@@ -258,11 +303,11 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
         contact: {
           studentPhone: data.contact.studentPhone?.trim() || undefined,
           studentEmail: data.contact.studentEmail?.trim() || undefined,
-          parentName: isMinor ? data.contact.parentName?.trim() : undefined,
-          parentPhone: isMinor ? data.contact.parentPhone?.trim() : undefined,
-          parentEmail: isMinor ? data.contact.parentEmail?.trim() : undefined,
-          parentRelation: isMinor
-            ? (data.contact.parentRelation as 'madre' | 'padre' | 'tutore' | 'altro' | undefined)
+          parentName: data.contact.parentName?.trim() || undefined,
+          parentPhone: data.contact.parentPhone?.trim() || undefined,
+          parentEmail: data.contact.parentEmail?.trim() || undefined,
+          parentRelation: data.contact.parentRelation
+            ? (data.contact.parentRelation as 'madre' | 'padre' | 'tutore' | 'altro')
             : undefined,
           emergencyContact: data.contact.emergencyContact?.trim() || '',
           emergencyPhone: data.contact.emergencyPhone?.trim() || '',
@@ -299,7 +344,13 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
       description="Inserisci le informazioni dettagliate dell'allievo."
       size='xl'
     >
-      <form onSubmit={handleSubmit(onSubmit)} className='space-y-6 max-h-[70vh] overflow-y-auto pr-1' noValidate>
+      <form
+        onSubmit={(e) => {
+          handleSubmit(onSubmit, () => onError(e.currentTarget))(e);
+        }}
+        className='space-y-6 max-h-[70vh] overflow-y-auto pr-1'
+        noValidate
+      >
         {/* Anagrafica Section */}
         <div className='space-y-4'>
           <h3 className='text-xs font-semibold uppercase tracking-wider text-brand-400 border-b border-white/5 pb-1'>
@@ -396,15 +447,14 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
             <Input
               label='Telefono Allievo'
               type='tel'
-              disabled={isMinor}
-              hint={isMinor ? 'Contatti genitore richiesti per minorenni' : undefined}
+              hint={isMinor ? 'Opzionale per allievi minorenni (i recapiti genitore sono sotto)' : undefined}
               error={errors.contact?.studentPhone?.message}
               {...register('contact.studentPhone')}
             />
             <Input
               label='Email Allievo'
               type='email'
-              disabled={isMinor}
+              hint={isMinor ? 'Opzionale per allievi minorenni' : undefined}
               error={errors.contact?.studentEmail?.message}
               {...register('contact.studentEmail')}
             />
@@ -417,18 +467,22 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
                 <span className='text-xs font-bold uppercase tracking-wider bg-brand-500/20 text-brand-300 px-2 py-0.5 rounded'>
                   Minorenne
                 </span>
-                <span className='text-xs text-white/50'>Compila i dati del genitore o tutore legale</span>
+                <span className='text-xs text-white/50'>
+                  {isEditing
+                    ? 'Dati del genitore o tutore legale (opzionali in modifica)'
+                    : 'Compila i dati del genitore o tutore legale'}
+                </span>
               </div>
               <div className='grid grid-cols-1 md:grid-cols-2 gap-4'>
                 <Input
                   label='Nome Genitore / Tutore'
-                  required
+                  required={!isEditing}
                   error={errors.contact?.parentName?.message}
                   {...register('contact.parentName')}
                 />
                 <Select
                   label='Relazione di Parentela'
-                  required
+                  required={!isEditing}
                   options={[
                     { value: 'madre', label: 'Madre' },
                     { value: 'padre', label: 'Padre' },
@@ -444,14 +498,14 @@ export function StudentForm({ isOpen, onClose, student, onSuccess }: StudentForm
                 <Input
                   label='Telefono Genitore'
                   type='tel'
-                  required
+                  required={!isEditing}
                   error={errors.contact?.parentPhone?.message}
                   {...register('contact.parentPhone')}
                 />
                 <Input
                   label='Email Genitore'
                   type='email'
-                  required
+                  required={!isEditing}
                   error={errors.contact?.parentEmail?.message}
                   {...register('contact.parentEmail')}
                 />

@@ -175,6 +175,7 @@ export interface StudentDocument {
   fileURL?: string; // only when STORAGE_ENABLED = true
   uploadedAt: Timestamp;
   notes?: string;
+  isValidated?: boolean;
 }
 
 export interface CostumeMeasurements {

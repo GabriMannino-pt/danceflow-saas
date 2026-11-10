@@ -103,3 +103,23 @@ export function buildFiscalCodeReminderWhatsAppMessage({
 
   return `Ciao ${salutation},\nper completare il tesseramento sportivo e la copertura assicurativa di ${studentName}, ti chiediamo cortesemente di comunicarci il Codice Fiscale dell'allievo.\nPuoi inviarlo rispondendo a questo messaggio oppure aggiornarlo nel tuo Portale Allievi.\n\nGrazie per la collaborazione,\n${schoolName}`;
 }
+
+/**
+ * Genera il messaggio ufficiale di benvenuto e attivazione credenziali per il Portale Genitori / Allievi
+ */
+export function buildPortalInvitationWhatsAppMessage({
+  schoolName = 'Tropical Style Caribbean School',
+  recipientName,
+  studentName,
+  activationLink,
+}: {
+  schoolName?: string;
+  recipientName?: string | null;
+  studentName: string;
+  activationLink: string;
+}): string {
+  const salutation = recipientName?.trim() ? `Gentile ${recipientName.trim()}` : `Gentile Genitore / Allievo`;
+
+  return `Ciao ${salutation},\nti diamo il benvenuto nel Portale Ufficiale di ${schoolName}! 🌴✨\n\nDa oggi puoi gestire comodamente online la scheda di ${studentName}:\n📄 Visualizzare e scaricare le ricevute fiscali dei pagamenti\n🩺 Caricare o verificare il certificato medico di idoneità\n🗓️ Consultare orari dei corsi e registro presenze\n\n🔗 Clicca qui per attivare il tuo profilo ed accedere al Portale:\n${activationLink}\n\n🔑 Istruzioni primo accesso: apri il link sopra e imposta la tua password personale riservata per completare l'attivazione.\n\nPer qualsiasi necessità la segreteria è sempre a tua completa disposizione!\n\nUn cordiale saluto,\nLo staff di ${schoolName}`;
+}
+
