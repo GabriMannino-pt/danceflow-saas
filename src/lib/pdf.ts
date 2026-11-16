@@ -483,9 +483,10 @@ export async function generateAnnualPaymentsReportPDF(
   courses.forEach((course) => {
     // Filter students enrolled in this course OR who have payments registered for it in this year
     const courseStudents = students.filter((s) => {
+      if (s.isDeleted) return false;
       const isEnrolled = s.enrolledCourseIds?.includes(course.id);
       const hasPayment = payments.some(
-        (p) => p.studentId === s.id && p.courseId === course.id && p.year === year && p.type === 'monthly' && p.status !== 'cancelled'
+        (p) => p.studentId === s.id && (p.courseId === course.id || !p.courseId) && p.year === year && p.type === 'monthly' && p.status !== 'cancelled'
       );
       return isEnrolled || hasPayment;
     });
@@ -554,25 +555,28 @@ export async function generateAnnualPaymentsReportPDF(
         const x = startX + ((mIndex - 1) * colWidth);
         doc.line(x, currentY, x, currentY + rowHeight);
 
-        // Find monthly payments for this student, course, month and year
-        const monthlyPayment = payments.find(
-          (p) =>
-            p.studentId === student.id &&
-            p.courseId === course.id &&
-            p.type === 'monthly' &&
-            p.month === mIndex &&
-            p.year === year &&
-            p.status !== 'cancelled'
-        );
+        // Find monthly payments for this student, month and year (supports multi-month & single monthly fee)
+        const monthlyPayment = payments.find((p) => {
+          if (p.studentId !== student.id || p.type !== 'monthly' || p.status === 'cancelled') return false;
+          if (p.year && p.year !== year) return false;
+          if (p.courseId && p.courseId !== course.id && (student.enrolledCourseIds?.length || 0) <= 1) return false;
+          const pMonths: number[] = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
+            ? (p as any).months
+            : (p.month ? [p.month] : []);
+          return pMonths.includes(mIndex);
+        });
 
         let cellText = '-';
         if (monthlyPayment) {
-          const total = monthlyPayment.totalAmount ?? monthlyPayment.amount;
-          const paidVal = monthlyPayment.paidAmount ?? (monthlyPayment.status === 'paid' ? monthlyPayment.amount : 0);
+          const monthsCount = (monthlyPayment as any).months && Array.isArray((monthlyPayment as any).months) && (monthlyPayment as any).months.length > 0
+            ? (monthlyPayment as any).months.length
+            : 1;
+          const total = (monthlyPayment.totalAmount ?? monthlyPayment.amount) / monthsCount;
+          const paidVal = (monthlyPayment.paidAmount ?? (monthlyPayment.status === 'paid' ? monthlyPayment.amount : 0)) / monthsCount;
           
           let status = monthlyPayment.status;
           if (status !== 'cancelled' && status !== 'paid') {
-            if (paidVal >= total) status = 'paid';
+            if (paidVal >= total && paidVal > 0) status = 'paid';
             else if (paidVal > 0) status = 'deposit_paid';
           }
 

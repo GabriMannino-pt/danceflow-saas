@@ -5,6 +5,7 @@ import { db } from '@/lib/firebase';
 import { COLLECTIONS, userConverter } from '@/lib/converters';
 import { useCourses } from '@/hooks/useCourses';
 import { useStudents } from '@/hooks/useStudents';
+import { usePayments } from '@/hooks/usePayments';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { useAuthStore } from '@/stores/authStore';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -26,16 +27,20 @@ import {
   Printer,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { generateAllCoursesAttendanceGridPDF } from '@/services/pdf/CourseGridPdfBuilder';
+import {
+  generateAllCoursesAttendanceGridPDF,
+  getCurrentAcademicYearString,
+} from '@/services/pdf/CourseGridPdfBuilder';
 
 export default function CoursesPage() {
   const navigate = useNavigate();
 
-  // Initialize real-time courses and students listening
+  // Initialize real-time courses, students, and payments listening
   const { deleteCourse } = useCourses();
   useStudents();
+  usePayments();
 
-  const { courses, isLoadingCourses, students, activeSchool } = useSchoolStore();
+  const { courses, isLoadingCourses, students, payments, activeSchool } = useSchoolStore();
   const user = useAuthStore((s) => s.user);
   const isTeacher = user?.role === 'teacher';
   const schoolId = user?.schoolId;
@@ -81,10 +86,11 @@ export default function CoursesPage() {
         students,
         activeSchool,
         teachersMap,
-        '2025/2026'
+        getCurrentAcademicYearString(),
+        payments
       );
       doc.save(`Registro_Corsi_Presenze_Quote_${new Date().getFullYear()}.pdf`);
-      toast.success(`Scaricato Registro Corsi (${activeCourses.length} corsi)!`);
+      toast.success(`Scaricato Registro Corsi compilato con i pagamenti (${activeCourses.length} corsi)!`);
     } catch (err: any) {
       console.error('[CoursesPage] Error generating secretary registry PDF:', err);
       toast.error('Impossibile generare il registro segreteria.');

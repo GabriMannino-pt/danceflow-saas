@@ -1,10 +1,112 @@
 import jsPDF from 'jspdf';
 import { format } from 'date-fns';
-import type { Course, Student, School } from '@/types';
+import type { Course, Student, School, Payment } from '@/types';
+import { getSchoolFiscalInfo } from '@/lib/pdf';
 
-const MONTH_NAMES = [
-  'SET', 'OTT', 'NOV', 'DIC', 'GEN', 'FEB', 'MAR', 'APR', 'MAG', 'GIU'
-];
+export const ACADEMIC_MONTHS = [
+  { label: 'SET', month: 9 },
+  { label: 'OTT', month: 10 },
+  { label: 'NOV', month: 11 },
+  { label: 'DIC', month: 12 },
+  { label: 'GEN', month: 1 },
+  { label: 'FEB', month: 2 },
+  { label: 'MAR', month: 3 },
+  { label: 'APR', month: 4 },
+  { label: 'MAG', month: 5 },
+  { label: 'GIU', month: 6 },
+] as const;
+
+export interface MonthPaymentStatus {
+  status: 'paid' | 'partial' | 'unpaid';
+  paidAmount: number;
+  receiptNumber?: string;
+}
+
+/**
+ * Calcola lo stato di pagamento di un allievo per una determinata mensilità.
+ * Supporta ricevute multi-mese (p.months) e allievi iscritti a più corsi (quota unica mensile).
+ */
+export function getStudentMonthPaymentStatus(
+  studentId: string,
+  monthNum: number,
+  payments: Payment[] = [],
+  academicYear?: string
+): MonthPaymentStatus {
+  let startYear: number | null = null;
+  let endYear: number | null = null;
+  if (academicYear && academicYear.includes('/')) {
+    const parts = academicYear.split('/');
+    const parsedStart = parseInt(parts[0], 10);
+    const parsedEnd = parseInt(parts[1], 10);
+    if (!isNaN(parsedStart) && !isNaN(parsedEnd)) {
+      startYear = parsedStart;
+      endYear = parsedEnd;
+    }
+  }
+
+  const matching = payments.filter((p) => {
+    if (p.studentId !== studentId || p.status === 'cancelled' || p.type !== 'monthly') return false;
+    const monthsList: number[] = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
+      ? (p as any).months
+      : (p.month ? [p.month] : []);
+    if (!monthsList.includes(monthNum)) return false;
+
+    if (startYear && endYear && p.year) {
+      if (monthNum >= 8) {
+        return p.year === startYear;
+      } else {
+        if (p.year === endYear) return true;
+        // Prepagamento primaverile registrato nell'anno di inizio stagione (es. pagato a Nov/Dic dimenticando il selettore anno)
+        if (p.year === startYear) {
+          const refDate = p.paidAt?.toDate?.() || p.dueDate?.toDate?.() || p.createdAt?.toDate?.();
+          if (!refDate) return true;
+          return refDate >= new Date(startYear, 7, 1);
+        }
+        return false;
+      }
+    }
+    return true;
+  });
+
+  if (matching.length === 0) return { status: 'unpaid', paidAmount: 0 };
+
+  let totalPaidForMonth = 0;
+  let isFullyPaid = false;
+  let receiptNumber: string | undefined;
+
+  for (const p of matching) {
+    const monthsCount = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
+      ? (p as any).months.length
+      : 1;
+    const rawPaid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
+    const perMonthPaid = rawPaid / monthsCount;
+    totalPaidForMonth += perMonthPaid;
+
+    if (p.status === 'paid' || (p.remainingAmount !== undefined && p.remainingAmount <= 0 && rawPaid > 0)) {
+      isFullyPaid = true;
+    }
+    if (p.receiptNumber) {
+      receiptNumber = String(p.receiptNumber);
+    }
+  }
+
+  if (isFullyPaid) {
+    return { status: 'paid', paidAmount: Math.round(totalPaidForMonth * 100) / 100, receiptNumber };
+  }
+  if (totalPaidForMonth > 0) {
+    return { status: 'partial', paidAmount: Math.round(totalPaidForMonth * 100) / 100, receiptNumber };
+  }
+  return { status: 'unpaid', paidAmount: 0 };
+}
+
+/**
+ * Verifica se l'allievo ha saldato la quota di iscrizione / tesseramento annuale.
+ */
+export function hasStudentPaidRegistration(studentId: string, payments: Payment[] = []): boolean {
+  return payments.some(
+    (p) => p.studentId === studentId && p.type === 'registration' && p.status === 'paid'
+  );
+}
 
 interface CourseGridOptions {
   course: Course;
@@ -13,6 +115,13 @@ interface CourseGridOptions {
   teacherName?: string;
   academicYear?: string;
   emptyRowsCount?: number;
+  payments?: Payment[];
+}
+
+export function getCurrentAcademicYearString(): string {
+  const now = new Date();
+  const startYear = now.getMonth() >= 7 ? now.getFullYear() : now.getFullYear() - 1;
+  return `${startYear}/${startYear + 1}`;
 }
 
 /**
@@ -28,8 +137,9 @@ export function buildCourseGridPage(
     students,
     school,
     teacherName,
-    academicYear = '2025/2026',
+    academicYear = getCurrentAcademicYearString(),
     emptyRowsCount = 5,
+    payments = [],
   } = options;
 
   if (!isFirstPage) {
@@ -42,13 +152,15 @@ export function buildCourseGridPage(
   const marginTop = 12;
   const contentWidth = pageWidth - marginX * 2; // 273mm
 
-  // Palette Colori Tropical Style
+  // Palette Colori Tropical Style / Latin Group
   const brandPurple: [number, number, number] = [124, 58, 237]; // #7c3aed
   const headerBg: [number, number, number] = [248, 249, 252];
   const darkText: [number, number, number] = [30, 27, 46];
   const grayText: [number, number, number] = [100, 105, 125];
   const borderLine: [number, number, number] = [205, 210, 225];
   const rowAltBg: [number, number, number] = [252, 253, 255];
+
+  const fiscal = getSchoolFiscalInfo(school);
 
   // ── 1. HEADER SCUOLA & REGISTRO ──
   // Fascia decorativa superiore brand
@@ -57,12 +169,12 @@ export function buildCourseGridPage(
 
   // Titolo Scuola
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
+  doc.setFontSize(15);
   doc.setTextColor(brandPurple[0], brandPurple[1], brandPurple[2]);
-  doc.text(school?.name ? school.name.toUpperCase() : 'TROPICAL STYLE CARIBBEAN SCHOOL', marginX, marginTop + 10);
+  doc.text(`${fiscal.legalName.toUpperCase()} · ${fiscal.brandName.toUpperCase()}`, marginX, marginTop + 10);
 
   // Titolo Documento
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(darkText[0], darkText[1], darkText[2]);
   doc.text('REGISTRO MENSILE SEGRETERIA & CONTROLLO QUOTE', marginX, marginTop + 15);
@@ -129,40 +241,30 @@ export function buildCourseGridPage(
     notes: 38,
   };
 
-  const tableTopY = courseBoxY + courseBoxHeight + 4;
+  const drawTableHeader = (yPos: number) => {
+    doc.setFillColor(brandPurple[0], brandPurple[1], brandPurple[2]);
+    doc.rect(marginX, yPos, contentWidth, 9, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+
+    let cx = marginX;
+    doc.text('N°', cx + colWidths.num / 2, yPos + 5.5, { align: 'center' });
+    cx += colWidths.num;
+    doc.text('ALLIEVO/A (Cognome e Nome)', cx + 3, yPos + 5.5);
+    cx += colWidths.name;
+    ACADEMIC_MONTHS.forEach((mObj) => {
+      doc.text(mObj.label, cx + colWidths.month / 2, yPos + 5.5, { align: 'center' });
+      cx += colWidths.month;
+    });
+    doc.text('QUOTA', cx + colWidths.fee / 2, yPos + 5.5, { align: 'center' });
+    cx += colWidths.fee;
+    doc.text('NOTE / ISCR.', cx + 3, yPos + 5.5);
+  };
+
+  let tableTopY = courseBoxY + courseBoxHeight + 4;
   const tableHeaderHeight = 9;
-
-  // Header Tabella Sfondo
-  doc.setFillColor(brandPurple[0], brandPurple[1], brandPurple[2]);
-  doc.rect(marginX, tableTopY, contentWidth, tableHeaderHeight, 'F');
-
-  // Testi Header Tabella
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-
-  let currentX = marginX;
-
-  // Colonna N°
-  doc.text('N°', currentX + colWidths.num / 2, tableTopY + 5.5, { align: 'center' });
-  currentX += colWidths.num;
-
-  // Colonna Allieva
-  doc.text('ALLIEVA (Cognome e Nome)', currentX + 3, tableTopY + 5.5);
-  currentX += colWidths.name;
-
-  // Colonne 10 Mesi
-  MONTH_NAMES.forEach((mName) => {
-    doc.text(mName, currentX + colWidths.month / 2, tableTopY + 5.5, { align: 'center' });
-    currentX += colWidths.month;
-  });
-
-  // Colonna Quota
-  doc.text('QUOTA', currentX + colWidths.fee / 2, tableTopY + 5.5, { align: 'center' });
-  currentX += colWidths.fee;
-
-  // Colonna Note
-  doc.text('NOTE / SALDO', currentX + 3, tableTopY + 5.5);
+  drawTableHeader(tableTopY);
 
   // ── 4. RIGHE ALLIEVE ──
   const enrolledStudents = students
@@ -177,6 +279,17 @@ export function buildCourseGridPage(
 
   // Disegno allieve iscritte
   enrolledStudents.forEach((st, idx) => {
+    if (currentY > pageHeight - 25) {
+      doc.setDrawColor(borderLine[0], borderLine[1], borderLine[2]);
+      doc.setLineWidth(0.4);
+      doc.rect(marginX, tableTopY, contentWidth, currentY - tableTopY);
+
+      doc.addPage('a4', 'landscape');
+      tableTopY = marginTop;
+      drawTableHeader(tableTopY);
+      currentY = tableTopY + tableHeaderHeight;
+    }
+
     // Sfondo alternato per massima leggibilità cartacea
     if (idx % 2 === 1) {
       doc.setFillColor(rowAltBg[0], rowAltBg[1], rowAltBg[2]);
@@ -202,21 +315,39 @@ export function buildCourseGridPage(
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(darkText[0], darkText[1], darkText[2]);
     const fullName = `${st.lastName.toUpperCase()} ${st.firstName.toUpperCase()}`;
-    // Tronca se troppo lungo
     const truncatedName = fullName.length > 28 ? fullName.substring(0, 26) + '...' : fullName;
     doc.text(truncatedName, cellX + 2.5, currentY + 5);
     doc.line(cellX + colWidths.name, currentY, cellX + colWidths.name, currentY + rowHeight);
     cellX += colWidths.name;
 
-    // 10 Mesi con caselline quadrate per spunta / importo
-    MONTH_NAMES.forEach(() => {
-      // Casellina centrale per spunta o firma a penna
-      doc.setDrawColor(220, 224, 235);
-      doc.setLineWidth(0.15);
-      const boxSize = 5.2;
-      const boxLeft = cellX + (colWidths.month - boxSize) / 2;
-      const boxTop = currentY + (rowHeight - boxSize) / 2;
-      doc.rect(boxLeft, boxTop, boxSize, boxSize);
+    // 10 Mesi con stato pagamento reale OPPURE casella vuota per banco
+    ACADEMIC_MONTHS.forEach((mObj) => {
+      const mStatus = getStudentMonthPaymentStatus(st.id, mObj.month, payments, academicYear);
+
+      if (mStatus.status === 'paid') {
+        doc.setFillColor(220, 252, 231); // Verde chiaro leggibile anche in stampa B/N
+        doc.rect(cellX + 0.5, currentY + 0.5, colWidths.month - 1, rowHeight - 1, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(6.5);
+        doc.setTextColor(5, 150, 105);
+        doc.text('PAGATO', cellX + colWidths.month / 2, currentY + 5, { align: 'center' });
+      } else if (mStatus.status === 'partial') {
+        doc.setFillColor(254, 243, 199); // Ambra chiaro
+        doc.rect(cellX + 0.5, currentY + 0.5, colWidths.month - 1, rowHeight - 1, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(5.8);
+        doc.setTextColor(180, 83, 9);
+        const label = mStatus.paidAmount > 0 ? `ACC. €${Math.round(mStatus.paidAmount)}` : 'ACC.';
+        doc.text(label, cellX + colWidths.month / 2, currentY + 5, { align: 'center' });
+      } else {
+        // Casellina vuota pronta per spunta a penna in segreteria
+        doc.setDrawColor(220, 224, 235);
+        doc.setLineWidth(0.15);
+        const boxSize = 5.2;
+        const boxLeft = cellX + (colWidths.month - boxSize) / 2;
+        const boxTop = currentY + (rowHeight - boxSize) / 2;
+        doc.rect(boxLeft, boxTop, boxSize, boxSize);
+      }
 
       // Linea divisoria verticale
       doc.setDrawColor(borderLine[0], borderLine[1], borderLine[2]);
@@ -225,15 +356,27 @@ export function buildCourseGridPage(
       cellX += colWidths.month;
     });
 
-    // Quota (€)
+    // Quota effettiva (€) - Rispetta eventuale quota personalizzata allievo
     doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
     doc.setTextColor(grayText[0], grayText[1], grayText[2]);
-    const feeText = course.fee?.monthly ? `€ ${course.fee.monthly},00` : '—';
+    const effectiveFee =
+      st.customMonthlyFee !== undefined && st.customMonthlyFee !== null
+        ? st.customMonthlyFee
+        : course.fee?.monthly;
+    const feeText = effectiveFee ? `€ ${effectiveFee},00` : '—';
     doc.text(feeText, cellX + colWidths.fee / 2, currentY + 5, { align: 'center' });
     doc.line(cellX + colWidths.fee, currentY, cellX + colWidths.fee, currentY + rowHeight);
     cellX += colWidths.fee;
 
-    // Note (vuoto per note a penna della segreteria)
+    // Note / Stato Iscrizione Annuale
+    if (payments.length > 0 && hasStudentPaidRegistration(st.id, payments)) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.5);
+      doc.setTextColor(5, 150, 105);
+      doc.text('Iscr. OK', cellX + 2.5, currentY + 5);
+    }
+    doc.setDrawColor(borderLine[0], borderLine[1], borderLine[2]);
     doc.line(cellX + colWidths.notes, currentY, cellX + colWidths.notes, currentY + rowHeight);
 
     currentY += rowHeight;
@@ -242,6 +385,7 @@ export function buildCourseGridPage(
   // ── 5. RIGHE EXTRA VUOTE (PER ALLIEVI DI PROVA O NUOVI INGRESSI A PENNA) ──
   const startEmptyIdx = enrolledStudents.length + 1;
   for (let e = 0; e < emptyRowsCount; e++) {
+    if (currentY > pageHeight - 20) break;
     const rowNum = startEmptyIdx + e;
 
     doc.setDrawColor(borderLine[0], borderLine[1], borderLine[2]);
@@ -269,7 +413,7 @@ export function buildCourseGridPage(
     cellX += colWidths.name;
 
     // 10 Mesi con caselline
-    MONTH_NAMES.forEach(() => {
+    ACADEMIC_MONTHS.forEach(() => {
       doc.setDrawColor(220, 224, 235);
       doc.setLineWidth(0.15);
       const boxSize = 5.2;
@@ -304,7 +448,7 @@ export function buildCourseGridPage(
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(grayText[0], grayText[1], grayText[2]);
   doc.text(
-    `Totale Allieve Iscritte: ${enrolledStudents.length}  |  Spazio per ${emptyRowsCount} ingressi prova/manuali  |  Registro Ufficiale Tropical Style Caribbean School`,
+    `Totale Allievi Iscritti: ${enrolledStudents.length}  |  PAGATO = Quota già registrata  |  [ ] = Da saldare al banco  |  ${fiscal.legalName}`,
     marginX,
     footerY
   );
@@ -312,14 +456,15 @@ export function buildCourseGridPage(
 }
 
 /**
- * Genera il PDF del registro per un SINGOLO corso
+ * Genera il PDF del registro per un SINGOLO corso (pre-compilato con pagamenti reali)
  */
 export function generateCourseAttendanceGridPDF(
   course: Course,
   students: Student[],
   school?: School | null,
   teacherName?: string,
-  academicYear: string = '2025/2026'
+  academicYear: string = getCurrentAcademicYearString(),
+  payments: Payment[] = []
 ): jsPDF {
   const doc = new jsPDF({
     orientation: 'landscape',
@@ -334,20 +479,22 @@ export function generateCourseAttendanceGridPDF(
     teacherName,
     academicYear,
     emptyRowsCount: 5,
+    payments,
   }, true);
 
   return doc;
 }
 
 /**
- * Genera un unico PDF multipagina con TUTTI i corsi attivi fascicolati
+ * Genera un unico PDF multipagina con TUTTI i corsi attivi fascicolati (pre-compilati con pagamenti reali)
  */
 export function generateAllCoursesAttendanceGridPDF(
   courses: Course[],
   students: Student[],
   school?: School | null,
   teachersMap: Record<string, string> = {},
-  academicYear: string = '2025/2026'
+  academicYear: string = getCurrentAcademicYearString(),
+  payments: Payment[] = []
 ): jsPDF {
   const doc = new jsPDF({
     orientation: 'landscape',
@@ -373,6 +520,7 @@ export function generateAllCoursesAttendanceGridPDF(
         teacherName,
         academicYear,
         emptyRowsCount: 5,
+        payments,
       },
       idx === 0 // la prima pagina non usa addPage
     );

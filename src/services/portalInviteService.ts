@@ -64,13 +64,16 @@ export function resolvePortalTargetContact(student: Student, age: number): Porta
   };
 }
 
+export const DEFAULT_PORTAL_INITIAL_PASSWORD = 'Tropical2026!';
+
 /**
  * Costruisce il link di primo accesso per l'attivazione dell'account.
  */
-export function buildPortalActivationUrl(email: string): string {
+export function buildPortalActivationUrl(email: string, initialPassword?: string): string {
   const cleanEmail = email.trim().toLowerCase();
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://danceflow-saas.web.app';
-  return `${origin}/login?email=${encodeURIComponent(cleanEmail)}&firstAccess=true`;
+  const baseUrl = `${origin}/login?email=${encodeURIComponent(cleanEmail)}&firstAccess=true`;
+  return initialPassword ? `${baseUrl}&initPwd=${encodeURIComponent(initialPassword)}` : baseUrl;
 }
 
 /**
@@ -89,6 +92,7 @@ export interface ProvisioningResult {
   isNewAccount: boolean;
   linkedPaymentsCount: number;
   updatedContact: Student['contact'];
+  initialPassword: string;
 }
 
 export interface ProvisionAndLinkParams {
@@ -98,6 +102,7 @@ export interface ProvisionAndLinkParams {
   recipientName: string;
   phone?: string;
   isMinor?: boolean;
+  initialPassword?: string;
 }
 
 /**
@@ -116,12 +121,14 @@ export async function provisionAndLinkPortalAccount({
   recipientName,
   phone,
   isMinor,
+  initialPassword,
 }: ProvisionAndLinkParams): Promise<ProvisioningResult> {
   const cleanEmail = targetEmail.trim().toLowerCase();
   if (!cleanEmail || !cleanEmail.includes('@')) {
     throw new Error('Inserisci un indirizzo email valido prima di procedere.');
   }
 
+  const tempPassword = initialPassword?.trim() || DEFAULT_PORTAL_INITIAL_PASSWORD;
   let parentUid: string | null = null;
   let isNewAccount = false;
 
@@ -162,7 +169,6 @@ export async function provisionAndLinkPortalAccount({
     const inviteAuth = getAuth(inviteApp);
 
     try {
-      const tempPassword = `DanceFlow_${Math.random().toString(36).substring(2, 10)}!${Date.now()}`;
       const cred = await createUserWithEmailAndPassword(inviteAuth, cleanEmail, tempPassword);
       parentUid = cred.user.uid;
       isNewAccount = true;
@@ -297,5 +303,6 @@ export async function provisionAndLinkPortalAccount({
     isNewAccount,
     linkedPaymentsCount,
     updatedContact,
+    initialPassword: tempPassword,
   };
 }

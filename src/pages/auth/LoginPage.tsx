@@ -3,8 +3,11 @@ import { useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Mail, Lock, Eye, EyeOff, LogIn, CheckCircle2 } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, LogIn, CheckCircle2, KeyRound } from 'lucide-react';
+import { signInWithEmailAndPassword, updatePassword } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 import { loginWithEmail, loginWithGoogle, sendResetEmail } from '@/hooks/useAuth';
+import { DEFAULT_PORTAL_INITIAL_PASSWORD } from '@/services/portalInviteService';
 import { Button, Input, Card, Modal } from '@/components/ui';
 
 const loginSchema = z.object({
@@ -18,6 +21,7 @@ export default function LoginPage() {
   const [searchParams] = useSearchParams();
   const paramEmail = searchParams.get('email') || '';
   const isFirstAccess = searchParams.get('firstAccess') === 'true' || searchParams.get('reset') === 'true';
+  const paramInitPwd = searchParams.get('initPwd') || DEFAULT_PORTAL_INITIAL_PASSWORD;
 
   const [showPassword, setShowPassword] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
@@ -25,6 +29,9 @@ export default function LoginPage() {
 
   const [resetModalOpen, setResetModalOpen] = useState(false);
   const [resetEmail, setResetEmail] = useState(paramEmail);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [useEmailFallback, setUseEmailFallback] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
@@ -62,7 +69,43 @@ export default function LoginPage() {
     setResetEmail(currentEmail || paramEmail || '');
     setResetSuccess(false);
     setResetError(null);
+    setUseEmailFallback(false);
     setResetModalOpen(true);
+  }
+
+  async function handleDirectFirstAccessSetup(e: React.FormEvent) {
+    e.preventDefault();
+    const cleanEmail = resetEmail.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
+      setResetError('Inserisci un indirizzo email valido.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      setResetError('La password deve contenere almeno 6 caratteri.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setResetError('Le due password inserite non coincidono.');
+      return;
+    }
+
+    setResetLoading(true);
+    setResetError(null);
+    try {
+      const cred = await signInWithEmailAndPassword(auth, cleanEmail, paramInitPwd);
+      await updatePassword(cred.user, newPassword);
+      setResetModalOpen(false);
+    } catch (err: unknown) {
+      console.error('[LoginPage] Direct first access setup error:', err);
+      const code = (err as { code?: string }).code;
+      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
+        setResetError('Questo account ha già una password personalizzata. Inseriscila nella schermata di accesso oppure clicca sotto per riceverne il ripristino via email.');
+      } else {
+        setResetError('Non è stato possibile completare l\'attivazione diretta. Puoi richiedere il link via email cliccando qui sotto.');
+      }
+    } finally {
+      setResetLoading(false);
+    }
   }
 
   async function handleSendReset(e: React.FormEvent) {
@@ -279,15 +322,17 @@ export default function LoginPage() {
         </p>
       </div>
 
-      {/* Password Reset Modal */}
+      {/* Password Reset / First-Access Activation Modal */}
       <Modal
         isOpen={resetModalOpen}
         onClose={() => setResetModalOpen(false)}
         title={isFirstAccess ? "Benvenuto! Imposta la tua password" : "Recupero Password"}
         description={
-          isFirstAccess
-            ? "Inserisci o conferma l'indirizzo email del tuo account per ricevere il link di attivazione e impostare la password del Portale."
-            : "Inserisci l'indirizzo email del tuo account per ricevere il link di ripristino."
+          isFirstAccess && !useEmailFallback
+            ? "Scegli subito la tua password personale per accedere immediatamente al Portale Genitori & Allievi (senza attendere alcuna email)."
+            : isFirstAccess
+              ? "Inserisci o conferma l'indirizzo email del tuo account per ricevere il link di attivazione e impostare la password del Portale."
+              : "Inserisci l'indirizzo email del tuo account per ricevere il link di ripristino."
         }
       >
         {resetSuccess ? (
@@ -311,6 +356,84 @@ export default function LoginPage() {
               </Button>
             </div>
           </div>
+        ) : isFirstAccess && !useEmailFallback ? (
+          <form onSubmit={handleDirectFirstAccessSetup} className="space-y-4 pt-2">
+            {resetError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-xs text-red-400 space-y-2">
+                <p>{resetError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetError(null);
+                    setUseEmailFallback(true);
+                  }}
+                  className="text-brand-300 underline font-medium cursor-pointer"
+                >
+                  Ricevi link di cambio password via Email →
+                </button>
+              </div>
+            )}
+            <Input
+              label="Indirizzo Email"
+              type="email"
+              placeholder="es. genitore@email.it"
+              icon={<Mail size={16} />}
+              fullWidth
+              value={resetEmail}
+              onChange={(e) => setResetEmail(e.target.value)}
+              required
+            />
+            <Input
+              label="Scegli la tua nuova password personale"
+              type="password"
+              placeholder="Minimo 6 caratteri"
+              icon={<KeyRound size={16} />}
+              fullWidth
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+              autoFocus
+            />
+            <Input
+              label="Conferma nuova password"
+              type="password"
+              placeholder="Ripeti la password scelta"
+              icon={<Lock size={16} />}
+              fullWidth
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+            />
+            <div className="flex gap-2 justify-end pt-2">
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setResetModalOpen(false)}
+                disabled={resetLoading}
+              >
+                Annulla
+              </Button>
+              <Button
+                type="submit"
+                loading={resetLoading}
+                className="btn-primary-gradient"
+              >
+                ✨ Attiva Account ed Entra nel Portale
+              </Button>
+            </div>
+            <div className="pt-2 border-t border-white/8 text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setResetError(null);
+                  setUseEmailFallback(true);
+                }}
+                className="text-xs text-white/50 hover:text-brand-300 underline cursor-pointer"
+              >
+                Preferisci ricevere il link via email? Clicca qui
+              </button>
+            </div>
+          </form>
         ) : (
           <form onSubmit={handleSendReset} className="space-y-4 pt-2">
             {resetError && (
@@ -346,6 +469,20 @@ export default function LoginPage() {
                 {isFirstAccess ? "Invia Link di Attivazione" : "Invia Link di Ripristino"}
               </Button>
             </div>
+            {isFirstAccess && (
+              <div className="pt-2 border-t border-white/8 text-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetError(null);
+                    setUseEmailFallback(false);
+                  }}
+                  className="text-xs text-brand-300 hover:underline cursor-pointer"
+                >
+                  ← Torna all'attivazione diretta con nuova password
+                </button>
+              </div>
+            )}
           </form>
         )}
       </Modal>

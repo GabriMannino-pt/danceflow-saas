@@ -112,14 +112,21 @@ export function buildPortalInvitationWhatsAppMessage({
   recipientName,
   studentName,
   activationLink,
+  email,
+  initialPassword,
 }: {
   schoolName?: string;
   recipientName?: string | null;
   studentName: string;
   activationLink: string;
+  email?: string;
+  initialPassword?: string;
 }): string {
   const salutation = recipientName?.trim() ? `Gentile ${recipientName.trim()}` : `Gentile Genitore / Allievo`;
+  const credBlock = initialPassword
+    ? `\n🔐 *Credenziali per accesso diretto:*\n• Email: ${email || 'la tua email'}\n• Password provvisoria: *${initialPassword}*\n`
+    : '';
 
-  return `Ciao ${salutation},\nti diamo il benvenuto nel Portale Ufficiale di ${schoolName}! 🌴✨\n\nDa oggi puoi gestire comodamente online la scheda di ${studentName}:\n📄 Visualizzare e scaricare le ricevute fiscali dei pagamenti\n🩺 Caricare o verificare il certificato medico di idoneità\n🗓️ Consultare orari dei corsi e registro presenze\n\n🔗 Clicca qui per attivare il tuo profilo ed accedere al Portale:\n${activationLink}\n\n🔑 Istruzioni primo accesso: apri il link sopra e imposta la tua password personale riservata per completare l'attivazione.\n\nPer qualsiasi necessità la segreteria è sempre a tua completa disposizione!\n\nUn cordiale saluto,\nLo staff di ${schoolName}`;
+  return `Ciao ${salutation},\nti diamo il benvenuto nel Portale Ufficiale di ${schoolName}! 🌴✨\n\nDa oggi puoi gestire comodamente online la scheda di ${studentName}:\n📄 Visualizzare e scaricare le ricevute fiscali dei pagamenti\n🩺 Caricare o verificare il certificato medico di idoneità\n🗓️ Consultare orari dei corsi e registro presenze\n\n🔗 Clicca qui per attivare il tuo profilo ed accedere al Portale:\n${activationLink}\n${credBlock}\n🔑 Istruzioni primo accesso: apri il link sopra e imposta la tua password personale riservata per completare l'attivazione.\n\nPer qualsiasi necessità la segreteria è sempre a tua completa disposizione!\n\nUn cordiale saluto,\nLo staff di ${schoolName}`;
 }
 

@@ -10,6 +10,13 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { PaymentForm } from '@/components/payments/PaymentForm';
 import { QuickPaymentModal } from '@/components/payments/QuickPaymentModal';
 import { generateReceiptPDF, generateAnnualPaymentsReportPDF, generateFilteredPaymentsPDF } from '@/lib/pdf';
+import {
+  ACADEMIC_MONTHS,
+  getStudentMonthPaymentStatus,
+  hasStudentPaidRegistration,
+  getCurrentAcademicYearString,
+  generateAllCoursesAttendanceGridPDF,
+} from '@/services/pdf/CourseGridPdfBuilder';
 import { exportToCSV } from '@/lib/excel';
 import type { Payment, PaymentMethod } from '@/types';
 
@@ -31,7 +38,9 @@ import {
   Edit,
   Trash2,
   XCircle,
-  MessageCircle
+  MessageCircle,
+  Zap,
+  Users
 } from 'lucide-react';
 import { 
   openWhatsAppChat, 
@@ -55,15 +64,23 @@ export default function PaymentsPage() {
     updateReceiptPayment,
   } = usePayments();
 
-  const [activeTab, setActiveTab] = useState<'all' | 'overdue'>('all');
+  const [activeTab, setActiveTab] = useState<'all' | 'realtime_unpaid' | 'overdue'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [courseFilter, setCourseFilter] = useState('all');
   const [monthFilter, setMonthFilter] = useState(0); // 0 = Tutti i mesi
 
+  // Real-time Monthly Unpaid Check States
+  const currentMonthDefault = new Date().getMonth() + 1;
+  const [checkMonth, setCheckMonth] = useState<number>(
+    ACADEMIC_MONTHS.some((m) => m.month === currentMonthDefault) ? currentMonthDefault : 9
+  );
+  const [checkStatusFilter, setCheckStatusFilter] = useState<'unpaid_only' | 'all'>('unpaid_only');
+
   // Quick Payment Modal State
   const [isQuickPaymentOpen, setIsQuickPaymentOpen] = useState(false);
   const [quickStudentId, setQuickStudentId] = useState<string | undefined>(undefined);
+  const [quickMonth, setQuickMonth] = useState<number | undefined>(undefined);
 
   // Pagination & Bulk Selection States
   const [pageSize, setPageSize] = useState<number>(10);
@@ -347,11 +364,101 @@ export default function PaymentsPage() {
       // so typing a receipt number immediately surfaces the receipt anywhere across all payments
       const matchesStatus = (matchesReceipt || statusFilter === 'all') ? true : p.status === statusFilter;
       const matchesCourse = (matchesReceipt || courseFilter === 'all') ? true : p.courseId === courseFilter;
-      const matchesMonth = (matchesReceipt || isSearching || monthFilter === 0) ? true : p.month === monthFilter;
+      const paymentMonths: number[] = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
+        ? (p as any).months
+        : (p.month ? [p.month] : []);
+      const matchesMonth = (matchesReceipt || isSearching || monthFilter === 0) ? true : paymentMonths.includes(monthFilter);
 
       return matchesSearch && matchesStatus && matchesCourse && matchesMonth;
     });
   }, [resolvedPayments, searchQuery, statusFilter, courseFilter, monthFilter, students]);
+
+  // ─── Real-Time Unpaid & Monthly Matrix Computation ──────────────────────────
+  const currentAcademicYear = getCurrentAcademicYearString();
+
+  const realtimeStudentsCheck = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const rows = students
+      .filter((s) => s.isActive && !s.isDeleted && (s.enrolledCourseIds?.length || 0) > 0)
+      .filter((s) => {
+        if (courseFilter !== 'all' && !s.enrolledCourseIds?.includes(courseFilter)) return false;
+        if (!q) return true;
+        return (
+          `${s.firstName} ${s.lastName}`.toLowerCase().includes(q) ||
+          `${s.lastName} ${s.firstName}`.toLowerCase().includes(q) ||
+          (s.fiscalCode && s.fiscalCode.toLowerCase().includes(q))
+        );
+      })
+      .sort((a, b) => a.lastName.localeCompare(b.lastName, 'it'))
+      .map((s) => {
+        const studentCourses = courses.filter((c) => s.enrolledCourseIds?.includes(c.id));
+        const firstCourse = studentCourses[0];
+        const expectedFee =
+          s.customMonthlyFee !== undefined && s.customMonthlyFee !== null
+            ? s.customMonthlyFee
+            : (firstCourse?.fee?.monthly || 40);
+        const monthStatus = getStudentMonthPaymentStatus(
+          s.id,
+          checkMonth,
+          resolvedPayments,
+          currentAcademicYear
+        );
+        const regPaid = hasStudentPaidRegistration(s.id, resolvedPayments);
+        return {
+          student: s,
+          studentCourses,
+          expectedFee,
+          monthStatus,
+          regPaid,
+        };
+      });
+
+    const unpaidCount = rows.filter((r) => r.monthStatus.status === 'unpaid').length;
+    const partialCount = rows.filter((r) => r.monthStatus.status === 'partial').length;
+    const paidCount = rows.filter((r) => r.monthStatus.status === 'paid').length;
+    const unpaidTotalExpected = rows
+      .filter((r) => r.monthStatus.status !== 'paid')
+      .reduce((acc, r) => acc + Math.max(0, r.expectedFee - r.monthStatus.paidAmount), 0);
+
+    const visibleRows = checkStatusFilter === 'unpaid_only'
+      ? rows.filter((r) => r.monthStatus.status !== 'paid')
+      : rows;
+
+    return {
+      rows: visibleRows,
+      totalActiveEnrolled: rows.length,
+      unpaidCount,
+      partialCount,
+      paidCount,
+      unpaidTotalExpected,
+    };
+  }, [students, courses, resolvedPayments, courseFilter, searchQuery, checkMonth, checkStatusFilter, currentAcademicYear]);
+
+  const handleDownloadCourseGrids = () => {
+    try {
+      const targetCourses = courseFilter === 'all'
+        ? courses
+        : courses.filter((c) => c.id === courseFilter);
+      const activeCount = targetCourses.filter((c) => !c.isDeleted && c.isActive).length;
+      if (activeCount === 0) {
+        toast.error('Nessun corso attivo trovato da stampare.');
+        return;
+      }
+      const doc = generateAllCoursesAttendanceGridPDF(
+        targetCourses,
+        students,
+        activeSchool,
+        {},
+        currentAcademicYear,
+        resolvedPayments
+      );
+      doc.save(`Registro_Corsi_Pagamenti_${new Date().getFullYear()}.pdf`);
+      toast.success(`Griglie PDF scaricate con i pagamenti aggiornati (${activeCount} corsi)!`);
+    } catch (err) {
+      console.error('[PaymentsPage] handleDownloadCourseGrids error:', err);
+      toast.error('Errore durante la generazione delle griglie PDF.');
+    }
+  };
 
   // Quick student match when searching by name
   const matchingStudents = useMemo(() => {
@@ -734,6 +841,14 @@ export default function PaymentsPage() {
             <div className="flex flex-wrap gap-2">
               <Button
                 variant="outline"
+                onClick={handleDownloadCourseGrids}
+                icon={<Printer size={18} />}
+                title="Scarica il Registro PDF di tutti i corsi già compilato con i pagamenti ricevuti"
+              >
+                Stampa Griglie Corsi (PDF)
+              </Button>
+              <Button
+                variant="outline"
                 onClick={() => setIsExportModalOpen(true)}
                 icon={<Download size={18} />}
               >
@@ -757,6 +872,7 @@ export default function PaymentsPage() {
               <Button
                 onClick={() => {
                   setQuickStudentId(undefined);
+                  setQuickMonth(undefined);
                   setIsQuickPaymentOpen(true);
                 }}
                 icon={<CheckCircle size={18} />}
@@ -812,18 +928,32 @@ export default function PaymentsPage() {
         </div>
 
         {/* Tabs */}
-        <div className="flex gap-2 border-b border-white/10 pb-2">
+        <div className="flex flex-wrap gap-2 border-b border-white/10 pb-2">
           <button
             onClick={() => setActiveTab('all')}
-            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-2 ${
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-2 cursor-pointer ${
               activeTab === 'all' ? 'border-brand-500 text-white' : 'border-transparent text-white/50 hover:text-white/80'
             }`}
           >
             Tutti i Pagamenti
           </button>
           <button
+            onClick={() => setActiveTab('realtime_unpaid')}
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-2 flex items-center gap-2 cursor-pointer ${
+              activeTab === 'realtime_unpaid' ? 'border-emerald-400 text-emerald-300' : 'border-transparent text-white/60 hover:text-emerald-300'
+            }`}
+          >
+            <Zap size={14} className="text-emerald-400" />
+            <span>Controllo Mensile & Mancati Pagamenti</span>
+            {(realtimeStudentsCheck.unpaidCount + realtimeStudentsCheck.partialCount) > 0 && (
+              <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-coral-500/20 text-coral-300 border border-coral-500/30">
+                {realtimeStudentsCheck.unpaidCount + realtimeStudentsCheck.partialCount}
+              </span>
+            )}
+          </button>
+          <button
             onClick={() => setActiveTab('overdue')}
-            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-2 flex items-center gap-2 ${
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors border-b-2 flex items-center gap-2 cursor-pointer ${
               activeTab === 'overdue' ? 'border-coral-500 text-coral-400' : 'border-transparent text-white/50 hover:text-coral-300'
             }`}
           >
@@ -831,6 +961,259 @@ export default function PaymentsPage() {
             Dashboard Morosità
           </button>
         </div>
+
+        {/* Content: CONTROLLO MENSILE & MANCATI PAGAMENTI (REAL-TIME) */}
+        {activeTab === 'realtime_unpaid' && (
+          <div className="space-y-4">
+            <Card className="p-4 space-y-4 border border-white/8">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Users size={16} className="text-brand-400" />
+                    Verifica Immediata Chi Deve Pagare — {ITALIAN_MONTHS[checkMonth - 1]} ({currentAcademicYear})
+                  </h3>
+                  <p className="text-xs text-white/50 mt-0.5">
+                    Confronta tutti gli allievi attivi iscritti con gli incassi registrati in tempo reale, anche senza aver generato le quote mensili.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleDownloadCourseGrids}
+                    icon={<Printer size={14} />}
+                  >
+                    Scarica Griglie PDF Compilate
+                  </Button>
+                </div>
+              </div>
+
+              {/* Month selector pills (SET - GIU) */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs text-white/50 mr-1 font-medium">Mese da verificare:</span>
+                {ACADEMIC_MONTHS.map((mObj) => {
+                  const isActiveMonth = checkMonth === mObj.month;
+                  return (
+                    <button
+                      key={mObj.month}
+                      type="button"
+                      onClick={() => setCheckMonth(mObj.month)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer border ${
+                        isActiveMonth
+                          ? 'bg-brand-500 text-white border-brand-400 shadow-md'
+                          : 'bg-black/20 text-white/60 border-white/10 hover:text-white hover:bg-white/10'
+                      }`}
+                    >
+                      {mObj.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Filters & Status toggle */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-1">
+                <Input
+                  placeholder="Cerca allievo per nome o CF..."
+                  icon={<Search size={16} />}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+                <Select
+                  options={[
+                    { value: 'all', label: 'Tutti i corsi' },
+                    ...courses.filter((c) => !c.isDeleted).map((c) => ({ value: c.id, label: c.name })),
+                  ]}
+                  value={courseFilter}
+                  onChange={(e) => setCourseFilter(e.target.value)}
+                />
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCheckStatusFilter('unpaid_only')}
+                    className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      checkStatusFilter === 'unpaid_only'
+                        ? 'bg-coral-500/20 text-coral-300 border-coral-500/40'
+                        : 'bg-black/20 text-white/50 border-white/10 hover:text-white'
+                    }`}
+                  >
+                    Solo Non Pagati ({realtimeStudentsCheck.unpaidCount + realtimeStudentsCheck.partialCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCheckStatusFilter('all')}
+                    className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      checkStatusFilter === 'all'
+                        ? 'bg-brand-500/20 text-brand-200 border-brand-500/40'
+                        : 'bg-black/20 text-white/50 border-white/10 hover:text-white'
+                    }`}
+                  >
+                    Tutti ({realtimeStudentsCheck.totalActiveEnrolled})
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Summary KPI Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-white/5 text-xs">
+                <div className="p-2.5 rounded-xl bg-coral-500/10 border border-coral-500/20">
+                  <span className="text-coral-300/80 block">Da Incassare ({ITALIAN_MONTHS[checkMonth - 1]})</span>
+                  <strong className="text-base text-coral-300 font-bold">
+                    {realtimeStudentsCheck.unpaidCount} allievi
+                  </strong>
+                </div>
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                  <span className="text-amber-300/80 block">Acconti Parziali</span>
+                  <strong className="text-base text-amber-300 font-bold">
+                    {realtimeStudentsCheck.partialCount} allievi
+                  </strong>
+                </div>
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                  <span className="text-emerald-300/80 block">Già In Regola</span>
+                  <strong className="text-base text-emerald-300 font-bold">
+                    {realtimeStudentsCheck.paidCount} allievi
+                  </strong>
+                </div>
+                <div className="p-2.5 rounded-xl bg-white/5 border border-white/10">
+                  <span className="text-white/50 block">Da Incassare (Stima)</span>
+                  <strong className="text-base text-white font-bold">
+                    €{realtimeStudentsCheck.unpaidTotalExpected.toFixed(2)}
+                  </strong>
+                </div>
+              </div>
+            </Card>
+
+            <Card className="p-0 overflow-hidden border border-white/8">
+              {realtimeStudentsCheck.rows.length === 0 ? (
+                <EmptyState
+                  icon="🎉"
+                  title="Tutti in regola per questo mese!"
+                  description={
+                    checkStatusFilter === 'unpaid_only'
+                      ? `Tutti gli allievi filtrati hanno già saldato ${ITALIAN_MONTHS[checkMonth - 1]}.`
+                      : 'Nessun allievo iscritto trovato con i filtri selezionati.'
+                  }
+                />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse min-w-[850px]">
+                    <thead>
+                      <tr className="border-b border-white/8 bg-white/[0.02] text-xs font-semibold text-white/50 tracking-wider">
+                        <th className="py-3.5 px-5">Allievo & Corsi</th>
+                        <th className="py-3.5 px-4">Quota Attesa</th>
+                        <th className="py-3.5 px-4">Stato {ITALIAN_MONTHS[checkMonth - 1]}</th>
+                        <th className="py-3.5 px-4">Panoramica SET–GIU</th>
+                        <th className="py-3.5 px-5 text-right">Azioni Rapide</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-sm">
+                      {realtimeStudentsCheck.rows.map((row) => {
+                        const { student: st, studentCourses, expectedFee, monthStatus } = row;
+                        return (
+                          <tr key={st.id} className="hover:bg-white/[0.03] transition-colors">
+                            <td className="py-3.5 px-5">
+                              <p className="font-bold text-white uppercase">
+                                {st.lastName} {st.firstName}
+                              </p>
+                              <p className="text-xs text-white/50 truncate max-w-[260px]">
+                                {studentCourses.map((c) => c.name).join(', ') || 'Nessun corso'}
+                              </p>
+                            </td>
+                            <td className="py-3.5 px-4 font-semibold text-white">
+                              €{expectedFee.toFixed(2)}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              {monthStatus.status === 'paid' ? (
+                                <Badge variant="success" size="sm">✓ Pagato (€{monthStatus.paidAmount.toFixed(0)})</Badge>
+                              ) : monthStatus.status === 'partial' ? (
+                                <Badge variant="warning" size="sm">Acconto (€{monthStatus.paidAmount.toFixed(0)})</Badge>
+                              ) : (
+                                <Badge variant="danger" size="sm">Non Pagato</Badge>
+                              )}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              <div className="flex flex-wrap gap-1">
+                                {ACADEMIC_MONTHS.map((mObj) => {
+                                  const ms = getStudentMonthPaymentStatus(
+                                    st.id,
+                                    mObj.month,
+                                    resolvedPayments,
+                                    currentAcademicYear
+                                  );
+                                  const cls =
+                                    ms.status === 'paid'
+                                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                      : ms.status === 'partial'
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                        : mObj.month === checkMonth
+                                          ? 'bg-coral-500/25 text-coral-200 border-coral-500/50 font-bold'
+                                          : 'bg-white/5 text-white/30 border-white/10';
+                                  return (
+                                    <button
+                                      key={mObj.month}
+                                      type="button"
+                                      onClick={() => setCheckMonth(mObj.month)}
+                                      className={`px-1.5 py-0.5 rounded text-[10px] border cursor-pointer ${cls}`}
+                                      title={`${mObj.label}: ${ms.status === 'paid' ? 'Pagato' : ms.status === 'partial' ? 'Acconto' : 'Non pagato'}`}
+                                    >
+                                      {mObj.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-5 text-right">
+                              <div className="flex items-center justify-end gap-2">
+                                {monthStatus.status !== 'paid' && (
+                                  <Button
+                                    size="sm"
+                                    variant="primary"
+                                    onClick={() => {
+                                      setQuickStudentId(st.id);
+                                      setQuickMonth(checkMonth);
+                                      setIsQuickPaymentOpen(true);
+                                    }}
+                                    icon={<CheckCircle size={14} />}
+                                    className="bg-brand-500 hover:bg-brand-600 text-white"
+                                  >
+                                    Incassa Ora
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10"
+                                  icon={<MessageCircle size={14} />}
+                                  onClick={() => {
+                                    const phone = getStudentWhatsAppPhone(st);
+                                    if (!phone) {
+                                      toast.error(`Nessun numero WhatsApp salvato per ${st.firstName} ${st.lastName}.`);
+                                      return;
+                                    }
+                                    const monthLabel = ITALIAN_MONTHS[checkMonth - 1] || `Mese ${checkMonth}`;
+                                    const msg = buildPaymentReminderWhatsAppMessage({
+                                      parentName: st.contact?.parentName,
+                                      studentName: `${st.firstName} ${st.lastName}`,
+                                      monthOrDescription: `${monthLabel} (${studentCourses.map((c) => c.name).join(', ') || 'Corso'})`,
+                                      amountDue: Math.max(0, expectedFee - monthStatus.paidAmount),
+                                      schoolName: activeSchool?.name || 'Tropical Style Caribbean School',
+                                    });
+                                    openWhatsAppChat(phone, msg);
+                                  }}
+                                  title="Sollecita su WhatsApp"
+                                >
+                                  WhatsApp
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
 
         {/* Content: ALL PAYMENTS */}
         {activeTab === 'all' && (
@@ -901,6 +1284,7 @@ export default function PaymentsPage() {
                       size="sm"
                       onClick={() => {
                         setQuickStudentId(s.id);
+                        setQuickMonth(undefined);
                         setIsQuickPaymentOpen(true);
                       }}
                       icon={<CheckCircle size={16} />}
@@ -1768,8 +2152,10 @@ export default function PaymentsPage() {
           onClose={() => {
             setIsQuickPaymentOpen(false);
             setQuickStudentId(undefined);
+            setQuickMonth(undefined);
           }}
           initialStudentId={quickStudentId}
+          initialMonth={quickMonth}
         />
 
         {/* MODAL: MODIFICA RICEVUTA (CONSERVA NUMERO ORIGINALE) */}

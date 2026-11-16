@@ -1,8 +1,10 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSchoolStore } from '@/stores/schoolStore';
+import { useAuthStore } from '@/stores/authStore';
 import { useCourses } from '@/hooks/useCourses';
 import { useStudents } from '@/hooks/useStudents';
+import { usePayments } from '@/hooks/usePayments';
 import { collection, query, where, getDocs } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
 import { COLLECTIONS, userConverter } from '@/lib/converters';
@@ -10,10 +12,17 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { Card, Badge, Button, EmptyState, Modal, ModalFooter, Select } from '@/components/ui';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import { CourseForm } from '@/components/courses/CourseForm';
+import { QuickPaymentModal } from '@/components/payments/QuickPaymentModal';
 import { DAYS_IT } from '@/lib/constants';
 import type { AppUser } from '@/types';
 import toast from 'react-hot-toast';
-import { generateCourseRegisterPDF } from '@/lib/pdf';
+import {
+  generateCourseAttendanceGridPDF,
+  ACADEMIC_MONTHS,
+  getStudentMonthPaymentStatus,
+  hasStudentPaidRegistration,
+  getCurrentAcademicYearString,
+} from '@/services/pdf/CourseGridPdfBuilder';
 import {
   Info,
   Users,
@@ -27,6 +36,8 @@ import {
   Download,
   UserPlus,
   UserMinus,
+  CheckCircle,
+  Plus,
 } from 'lucide-react';
 
 
@@ -36,13 +47,16 @@ export default function CourseDetailPage() {
   const { id: courseId } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  // Ensure real-time courses and students subscriptions are active
+  // Ensure real-time courses, students, and payments subscriptions are active
   useCourses();
   useStudents();
+  usePayments();
   const { editStudent } = useStudents();
   const { editCourse } = useCourses();
 
-  const { courses, students, isLoadingCourses, activeSchool } = useSchoolStore();
+  const user = useAuthStore((s) => s.user);
+  const isTeacher = user?.role === 'teacher';
+  const { courses, students, payments, isLoadingCourses, activeSchool } = useSchoolStore();
   
   // Default tab: 'students' so the owner immediately sees enrolled students
   const [activeTab, setActiveTab] = useState<TabType>('students');
@@ -50,6 +64,11 @@ export default function CourseDetailPage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [selectedStudentToAdd, setSelectedStudentToAdd] = useState('');
   const [teacher, setTeacher] = useState<AppUser | null>(null);
+  const [quickPayModal, setQuickPayModal] = useState<{
+    isOpen: boolean;
+    studentId?: string;
+    month?: number;
+  }>({ isOpen: false });
 
   const course = useMemo(() => courses.find((c) => c.id === courseId), [courses, courseId]);
 
@@ -101,16 +120,25 @@ export default function CourseDetailPage() {
     }
   };
 
-  const handleExportRegister = async () => {
+  const currentAcademicYear = getCurrentAcademicYearString();
+
+  const handleExportRegister = () => {
     if (!activeSchool) {
       toast.error('Scuola non selezionata.');
       return;
     }
     if (!course) return;
     try {
-      const doc = await generateCourseRegisterPDF(course, enrolledStudents, activeSchool);
-      doc.save(`Registro_${course.name.replace(/\s+/g, '_')}.pdf`);
-      toast.success('Registro scaricato.');
+      const doc = generateCourseAttendanceGridPDF(
+        course,
+        students,
+        activeSchool,
+        teacher?.displayName,
+        currentAcademicYear,
+        payments
+      );
+      doc.save(`Registro_Quote_${course.name.replace(/\s+/g, '_')}.pdf`);
+      toast.success('Registro corso con pagamenti scaricato!');
     } catch (err) {
       console.error('[CourseDetail] Export register PDF error:', err);
       toast.error('Impossibile generare il PDF.');
@@ -164,7 +192,7 @@ export default function CourseDetailPage() {
     { id: 'students', label: 'Allievi Iscritti', icon: <Users size={16} />, badge: enrolledStudents.length },
     { id: 'info', label: 'Dettagli Corso', icon: <Info size={16} /> },
     { id: 'schedule', label: 'Orari', icon: <Calendar size={16} /> },
-    { id: 'payments', label: 'Pagamenti', icon: <CreditCard size={16} /> },
+    ...(!isTeacher ? [{ id: 'payments', label: 'Pagamenti', icon: <CreditCard size={16} /> }] : []),
   ] as const;
 
   return (
@@ -476,21 +504,173 @@ export default function CourseDetailPage() {
           )}
 
           {/* TAB: PAGAMENTI */}
-          {activeTab === 'payments' && (
-            <Card className="p-8 text-center border border-white/5 border-dashed">
-              <CreditCard size={48} className="mx-auto text-white/20 mb-4" />
-              <h3 className="text-lg font-bold text-white mb-2">Riepilogo Pagamenti</h3>
-              <p className="text-white/50 max-w-md mx-auto">
-                Il modulo pagamenti sarà disponibile nel prossimo step (Step 13). Da qui potrai vedere tutte le quote mensili generate per gli allievi di questo corso.
-              </p>
-            </Card>
-          )}
+          {activeTab === 'payments' && !isTeacher && (() => {
+            const currM = new Date().getMonth() + 1;
+            const paidCountCurr = enrolledStudents.filter(
+              (st) => getStudentMonthPaymentStatus(st.id, currM, payments, currentAcademicYear).status === 'paid'
+            ).length;
+            const unpaidCountCurr = enrolledStudents.length - paidCountCurr;
+
+            return (
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white/[0.02] border border-white/5 p-4 rounded-2xl">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <CreditCard size={16} className="text-brand-400" />
+                      Situazione Pagamenti Corso ({currentAcademicYear})
+                    </h3>
+                    <p className="text-xs text-white/50 mt-0.5">
+                      Mese corrente: <strong className="text-emerald-400">{paidCountCurr} pagati</strong> · <strong className="text-coral-400">{unpaidCountCurr} da saldare</strong>. Clicca su qualsiasi mese da pagare per incassare subito.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleExportRegister}
+                      icon={<Download size={14} />}
+                    >
+                      Scarica Griglia Pagamenti PDF
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => setQuickPayModal({ isOpen: true })}
+                      icon={<Plus size={14} />}
+                    >
+                      Registra Pagamento
+                    </Button>
+                  </div>
+                </div>
+
+                <Card className="p-0 overflow-hidden border border-white/5">
+                  {enrolledStudents.length === 0 ? (
+                    <EmptyState
+                      icon="💳"
+                      title="Nessun Allievo Iscritto"
+                      description="Iscrivi almeno un allievo al corso per visualizzare la tabella dei pagamenti mensili."
+                    />
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left border-collapse min-w-[820px]">
+                        <thead>
+                          <tr className="border-b border-white/8 bg-white/[0.02] text-[11px] font-semibold text-white/50 uppercase tracking-wider">
+                            <th className="py-3 px-4">Allievo</th>
+                            <th className="py-3 px-3 text-center">Quota</th>
+                            <th className="py-3 px-2 text-center">Iscr.</th>
+                            {ACADEMIC_MONTHS.map((mObj) => (
+                              <th
+                                key={mObj.month}
+                                className={`py-3 px-1.5 text-center ${
+                                  mObj.month === currM ? 'text-brand-300 bg-brand-500/10' : ''
+                                }`}
+                              >
+                                {mObj.label}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-white/5 text-xs">
+                          {enrolledStudents.map((st) => {
+                            const effectiveFee =
+                              st.customMonthlyFee !== undefined && st.customMonthlyFee !== null
+                                ? st.customMonthlyFee
+                                : course.fee?.monthly;
+                            const regOk = hasStudentPaidRegistration(st.id, payments);
+
+                            return (
+                              <tr key={st.id} className="hover:bg-white/[0.02] transition-colors">
+                                <td
+                                  className="py-3 px-4 font-semibold text-white cursor-pointer hover:text-brand-300"
+                                  onClick={() => navigate(`/students/${st.id}`)}
+                                >
+                                  <span className="uppercase">{st.lastName}</span> {st.firstName}
+                                </td>
+                                <td className="py-3 px-3 text-center text-white/70 font-medium">
+                                  {effectiveFee ? `€${effectiveFee}` : '—'}
+                                </td>
+                                <td className="py-3 px-2 text-center">
+                                  {regOk ? (
+                                    <Badge variant="success" size="sm">OK</Badge>
+                                  ) : (
+                                    <Badge variant="gray" size="sm">—</Badge>
+                                  )}
+                                </td>
+                                {ACADEMIC_MONTHS.map((mObj) => {
+                                  const ms = getStudentMonthPaymentStatus(
+                                    st.id,
+                                    mObj.month,
+                                    payments,
+                                    currentAcademicYear
+                                  );
+                                  const isCurr = mObj.month === currM;
+                                  return (
+                                    <td
+                                      key={mObj.month}
+                                      className={`py-2.5 px-1 text-center ${isCurr ? 'bg-brand-500/5' : ''}`}
+                                    >
+                                      {ms.status === 'paid' ? (
+                                        <span
+                                          className="inline-flex items-center justify-center px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-semibold text-[10px]"
+                                          title={ms.receiptNumber ? `Pagato - Ricevuta N° ${ms.receiptNumber}` : 'Pagato'}
+                                        >
+                                          <CheckCircle size={10} className="mr-0.5" />
+                                          {ms.paidAmount > 0 ? `€${Math.round(ms.paidAmount)}` : 'OK'}
+                                        </span>
+                                      ) : ms.status === 'partial' ? (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setQuickPayModal({ isOpen: true, studentId: st.id, month: mObj.month })
+                                          }
+                                          className="inline-flex items-center justify-center px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/30 font-semibold text-[10px] hover:bg-amber-500/25 cursor-pointer"
+                                          title="Acconto registrato - Clicca per saldare"
+                                        >
+                                          Acc. €{Math.round(ms.paidAmount)}
+                                        </button>
+                                      ) : (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            setQuickPayModal({ isOpen: true, studentId: st.id, month: mObj.month })
+                                          }
+                                          className={`inline-flex items-center justify-center px-1.5 py-0.5 rounded-md border text-[10px] transition-colors cursor-pointer ${
+                                            isCurr
+                                              ? 'bg-coral-500/15 text-coral-300 border-coral-500/30 hover:bg-coral-500/30 font-semibold'
+                                              : 'bg-white/5 text-white/35 border-white/10 hover:text-white hover:border-brand-500/40'
+                                          }`}
+                                          title={`Incassa ${mObj.label} per ${st.firstName} ${st.lastName}`}
+                                        >
+                                          Da pag.
+                                        </button>
+                                      )}
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </Card>
+              </div>
+            );
+          })()}
         </div>
 
         <CourseForm
           isOpen={isFormOpen}
           onClose={() => setIsFormOpen(false)}
           course={course}
+        />
+
+        <QuickPaymentModal
+          isOpen={quickPayModal.isOpen}
+          onClose={() => setQuickPayModal({ isOpen: false })}
+          initialStudentId={quickPayModal.studentId}
+          initialMonth={quickPayModal.month}
         />
       </div>
     </ErrorBoundary>

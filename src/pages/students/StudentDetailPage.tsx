@@ -52,6 +52,7 @@ import {
   buildPortalActivationUrl,
   sendPortalPasswordResetEmail,
   provisionAndLinkPortalAccount,
+  DEFAULT_PORTAL_INITIAL_PASSWORD,
 } from '@/services/portalInviteService';
 import { usePayments } from '@/hooks/usePayments';
 
@@ -2268,6 +2269,7 @@ interface CompletedInviteState {
   email: string;
   phone?: string;
   recipientName: string;
+  initialPassword?: string;
 }
 
 function PortalInviteModal({
@@ -2309,7 +2311,7 @@ function PortalInviteModal({
 
     setLoading(true);
     try {
-      // 1. Provision Auth user and link student + payments + persist contact in Firestore
+      // 1. Provision Auth user with readable initial password and link student + payments + persist contact
       const res = await provisionAndLinkPortalAccount({
         student,
         schoolId,
@@ -2317,27 +2319,23 @@ function PortalInviteModal({
         recipientName: recipientName.trim(),
         phone: cleanPhone,
         isMinor: target.isMinor,
+        initialPassword: DEFAULT_PORTAL_INITIAL_PASSWORD,
       });
 
-      // 2. Build activation link
-      const activationLink = buildPortalActivationUrl(cleanEmail);
+      // 2. Build direct activation link (Zero-Email in-app password setup)
+      const activationLink = buildPortalActivationUrl(cleanEmail, res.initialPassword);
 
-      // 3. Build WhatsApp text
+      // 3. Build WhatsApp text including direct access credentials
       const message = buildPortalInvitationWhatsAppMessage({
         schoolName,
         recipientName: recipientName.trim(),
         studentName: `${student.firstName} ${student.lastName}`.trim(),
         activationLink,
+        email: cleanEmail,
+        initialPassword: res.initialPassword,
       });
 
-      // 4. Background reset email as safety backup
-      try {
-        await sendPortalPasswordResetEmail(cleanEmail);
-      } catch (e) {
-        console.warn('[PortalInviteModal] Background password reset email:', e);
-      }
-
-      // 5. Build clean URL and attempt to open WhatsApp chat
+      // 4. Build clean URL and attempt to open WhatsApp chat (no background reset email to avoid Firebase throttling)
       const cleanDigits = cleanPhoneNumber(cleanPhone);
       const whatsappUrl = `https://wa.me/${cleanDigits}?text=${encodeURIComponent(message)}`;
       openWhatsAppChat(cleanPhone, message);
@@ -2357,6 +2355,7 @@ function PortalInviteModal({
         email: cleanEmail,
         phone: cleanPhone,
         recipientName: recipientName.trim(),
+        initialPassword: res.initialPassword,
       });
     } catch (err: unknown) {
       console.error('[PortalInviteModal] WhatsApp error:', err);
@@ -2429,6 +2428,11 @@ function PortalInviteModal({
               <p className="text-emerald-400 font-medium">
                 I dati di contatto sono stati salvati automaticamente nell'anagrafica allievo.
               </p>
+              {completedInvite.initialPassword && (
+                <p className="text-xs text-white/80 bg-black/30 px-2.5 py-1.5 rounded-lg border border-white/10 mt-1">
+                  Password provvisoria inclusa nel messaggio: <strong className="text-emerald-300 font-mono">{completedInvite.initialPassword}</strong>
+                </p>
+              )}
             </div>
           </div>
 

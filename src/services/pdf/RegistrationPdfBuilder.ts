@@ -1,6 +1,7 @@
 import jsPDF from 'jspdf';
-import { format } from 'date-fns';
+import { format, differenceInYears } from 'date-fns';
 import { it } from 'date-fns/locale';
+import { getSchoolFiscalInfo } from '@/lib/pdf';
 
 interface StudentPdfData {
   firstName: string;
@@ -115,23 +116,27 @@ export async function generateRegistrationPdf(
     doc.text('LOGO', 32.5, 28, { align: 'center' });
   }
 
-  // School Info
+  // School Info (Allineato ai dati fiscali ufficiali S.S.D. ARL LATIN GROUP)
+  const fiscal = getSchoolFiscalInfo(school as any);
+
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
+  doc.setFontSize(14);
   doc.setTextColor(primaryColor[0], primaryColor[1], primaryColor[2]);
-  doc.text(school.name, 50, 22);
+  doc.text(fiscal.legalName, 50, 20);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(30, 41, 59);
+  doc.text(fiscal.brandName, 50, 25);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
   doc.setTextColor(80, 80, 80);
-  const schoolStreet = school.address?.street || 'Indirizzo non specificato';
-  const schoolCity = `${school.address?.postalCode || ''} ${school.address?.city || ''} (${school.address?.province || ''})`;
-  const schoolContact = `Email: ${school.contact?.email || ''} | Tel: ${school.contact?.phone || ''}`;
-  const schoolFiscal = `P.IVA/CF: ${school.contact?.website || 'Non specificato'}`;
-  doc.text(schoolStreet, 50, 27);
-  doc.text(schoolCity, 50, 31);
-  doc.text(schoolContact, 50, 35);
-  doc.text(schoolFiscal, 50, 39);
+  doc.text(`Sede Legale: ${fiscal.fullAddress}`, 50, 30);
+  doc.text(`Cod. Fisc. / P.IVA: ${fiscal.taxId || '05523810876'}`, 50, 34.5);
+  if (fiscal.email) {
+    doc.text(`Email: ${fiscal.email}${fiscal.phone ? ` | Tel: ${fiscal.phone}` : ''}`, 50, 39);
+  }
 
   // Line separator
   doc.setDrawColor(220, 220, 220);
@@ -188,9 +193,30 @@ export async function generateRegistrationPdf(
   doc.text(`Telefono Allievo: ${student.contact.studentPhone || '—'}`, 25, 96);
   doc.text(`Email Allievo: ${student.contact.studentEmail || '—'}`, 90, 96);
 
-  // --- PARENT / GUARDIAN (if minor) ---
+  // --- PARENT / GUARDIAN (only if minor or guardian distinct from student) ---
+  let isMinor = false;
+  if (student.dateOfBirth) {
+    try {
+      const dob = typeof student.dateOfBirth.toDate === 'function'
+        ? student.dateOfBirth.toDate()
+        : new Date(student.dateOfBirth);
+      if (!isNaN(dob.getTime())) {
+        isMinor = differenceInYears(new Date(), dob) < 18;
+      }
+    } catch {
+      isMinor = false;
+    }
+  }
+  const studentFullNameLower = `${student.firstName} ${student.lastName}`.trim().toLowerCase();
+  const parentCleanNameLower = (student.contact.parentName || '').trim().toLowerCase();
+  const hasDistinctGuardian = Boolean(
+    parentCleanNameLower &&
+    student.contact.parentRelation !== 'allievo' &&
+    parentCleanNameLower !== studentFullNameLower
+  );
+
   let yOffset = 114;
-  if (student.contact.parentName) {
+  if (isMinor || hasDistinctGuardian) {
     doc.setFillColor(249, 250, 251);
     doc.rect(20, yOffset, pageWidth - 40, 24, 'F');
     doc.rect(20, yOffset, pageWidth - 40, 24, 'S');
@@ -203,7 +229,7 @@ export async function generateRegistrationPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(50, 50, 50);
-    doc.text(`Nominativo: ${student.contact.parentName} (${student.contact.parentRelation || 'Genitore'})`, 25, yOffset + 12);
+    doc.text(`Nominativo: ${student.contact.parentName || '—'} (${student.contact.parentRelation || 'Genitore'})`, 25, yOffset + 12);
     doc.text(`Telefono Genitore: ${student.contact.parentPhone || '—'}`, 25, yOffset + 18);
     doc.text(`Email Genitore: ${student.contact.parentEmail || '—'}`, 90, yOffset + 18);
     
@@ -236,6 +262,11 @@ export async function generateRegistrationPdf(
   doc.setTextColor(0, 0, 0);
   doc.text('Firma digitale per presa visione e consenso:', 20, sigY);
 
+  const resolvedSignerName =
+    (isMinor || hasDistinctGuardian) && student.contact?.parentName
+      ? student.contact.parentName
+      : `${student.firstName} ${student.lastName}`;
+
   // Add signature image (Base64 PNG) or cursive signature fallback
   try {
     const imgData = signatureBase64 && typeof signatureBase64 === 'string' && signatureBase64.trim().length > 50
@@ -248,15 +279,13 @@ export async function generateRegistrationPdf(
       doc.setFont('times', 'italic');
       doc.setFontSize(13);
       doc.setTextColor(30, 40, 90);
-      const displayName = student.contact?.parentName || `${student.firstName} ${student.lastName}`;
-      doc.text(displayName, 22, sigY + 12);
+      doc.text(resolvedSignerName, 22, sigY + 12);
     }
   } catch (imgError) {
     doc.setFont('times', 'italic');
     doc.setFontSize(13);
     doc.setTextColor(30, 40, 90);
-    const displayName = student.contact?.parentName || `${student.firstName} ${student.lastName}`;
-    doc.text(displayName, 22, sigY + 12);
+    doc.text(resolvedSignerName, 22, sigY + 12);
   }
 
   // Draw signature line
@@ -266,8 +295,7 @@ export async function generateRegistrationPdf(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.setTextColor(120, 120, 120);
-  const signerName = student.contact.parentName || `${student.firstName} ${student.lastName}`;
-  doc.text(`Firmatario: ${signerName}`, 20, sigY + 23);
+  doc.text(`Firmatario: ${resolvedSignerName}`, 20, sigY + 23);
 
   // --- FES AUDIT LOG BLOCK ---
   const fesY = pageHeight - 38;
