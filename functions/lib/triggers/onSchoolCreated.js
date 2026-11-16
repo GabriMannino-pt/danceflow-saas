@@ -18,8 +18,8 @@ exports.onSchoolCreated = (0, firestore_1.onDocumentCreated)('schools/{schoolId}
         return;
     }
     console.log(`[onSchoolCreated] Sending welcome email for school "${schoolName}" to ${adminEmail}`);
-    const accessLink = `https://danceflow-saas.web.app/login`;
-    const qrRegistrationLink = `https://danceflow-saas.web.app/join/${qrToken}`;
+    const accessLink = `https://www.tropicalstyle.it/login`;
+    const qrRegistrationLink = `https://www.tropicalstyle.it/join/${qrToken}`;
     const emailSubject = `Benvenuto su DanceFlow — La tua scuola "${schoolName}" è attiva!`;
     const emailHtml = `
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">

@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.checkMedicalExpirations = void 0;
 const scheduler_1 = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pLimit = require('p-limit');
 /**
  * Helper to send a message via WhatsApp Business API / Twilio
  */
@@ -171,6 +173,9 @@ exports.checkMedicalExpirations = (0, scheduler_1.onSchedule)({
             .where('medicalInfo.medicalClearanceExpiry', '<=', targetEndTimestamp)
             .get();
         console.log(`[checkMedicalExpirations] Found ${expiringStudentsSnap.size} students with medical certificates expiring in exactly 30 days.`);
+        // Concurrency pool for external HTTP WhatsApp notifications
+        const limit = pLimit(5);
+        const whatsappTasks = [];
         for (const doc of expiringStudentsSnap.docs) {
             const student = doc.data();
             const studentId = doc.id;
@@ -227,11 +232,11 @@ exports.checkMedicalExpirations = (0, scheduler_1.onSchedule)({
                 updatedAt: admin.firestore.FieldValue.serverTimestamp(),
             });
             count++;
-            // C. Send WhatsApp message via Twilio helper
+            // C. Queue WhatsApp message for concurrent sending via pLimit
             const parentPhone = student.contact?.parentPhone || student.contact?.studentPhone;
             if (parentPhone) {
                 const whatsappText = `Ciao ${parentName}, ti ricordiamo che il certificato medico di ${studentName} iscritto a ${schoolName} scadrà il ${formattedExpiryDate}. Per motivi legali e assicurativi, ti invitiamo a caricare il nuovo certificato prima di tale data accedendo direttamente al tuo Portale Allievi. Grazie!`;
-                await sendWhatsAppMessage(parentPhone, whatsappText);
+                whatsappTasks.push(() => sendWhatsAppMessage(parentPhone, whatsappText));
             }
             else {
                 console.warn(`[checkMedicalExpirations] Student ${studentId} does not have parent or student phone for WhatsApp reminder.`);
@@ -246,6 +251,13 @@ exports.checkMedicalExpirations = (0, scheduler_1.onSchedule)({
         if (count > 0) {
             await batch.commit();
             console.log(`[checkMedicalExpirations] Committed final batch of ${count} operations (expiring).`);
+        }
+        // Execute queued external WhatsApp notifications in parallel with concurrency limit
+        if (whatsappTasks.length > 0) {
+            console.log(`[checkMedicalExpirations] Dispatching ${whatsappTasks.length} WhatsApp reminders with p-limit (concurrency: 5)...`);
+            const results = await Promise.allSettled(whatsappTasks.map((task) => limit(task)));
+            const sentCount = results.filter((r) => r.status === 'fulfilled' && r.value).length;
+            console.log(`[checkMedicalExpirations] WhatsApp batch complete: ${sentCount}/${whatsappTasks.length} dispatched successfully.`);
         }
         console.log('[checkMedicalExpirations] Completed medical expiration checks successfully.');
     }

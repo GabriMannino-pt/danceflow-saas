@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { usePayments } from '@/hooks/usePayments';
 import { useSchoolStore } from '@/stores/schoolStore';
+import { useShallow } from 'zustand/react/shallow';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { writeBatch, doc, Timestamp } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
@@ -52,7 +53,14 @@ import toast from 'react-hot-toast';
 
 export default function PaymentsPage() {
   usePayments(); // active listener
-  const { payments, students, courses, activeSchool } = useSchoolStore();
+  const { payments, students, courses, activeSchool } = useSchoolStore(
+    useShallow((s) => ({
+      payments: s.payments,
+      students: s.students,
+      courses: s.courses,
+      activeSchool: s.activeSchool,
+    }))
+  );
   const { 
     registerInstallment, 
     generateMonthlyFees,
@@ -213,15 +221,34 @@ export default function PaymentsPage() {
   const [genYear, setGenYear] = useState(new Date().getFullYear());
   const [genDueDate, setGenDueDate] = useState(new Date().toISOString().split('T')[0]);
 
+  // ─── Indexed O(1) Lookups for Instant Rendering & Zero Keystroke Lag ─────────
+  const studentsById = useMemo(() => {
+    const map = new Map<string, typeof students[0]>();
+    for (let i = 0; i < students.length; i++) {
+      const s = students[i];
+      if (s) map.set(s.id, s);
+    }
+    return map;
+  }, [students]);
+
+  const coursesById = useMemo(() => {
+    const map = new Map<string, typeof courses[0]>();
+    for (let i = 0; i < courses.length; i++) {
+      const c = courses[i];
+      if (c) map.set(c.id, c);
+    }
+    return map;
+  }, [courses]);
+
   const resolvedPayments = useMemo(() => {
     return payments
       .filter((p) => {
-        const student = students.find((s) => s.id === p.studentId);
+        const student = studentsById.get(p.studentId);
         return !student || !student.isDeleted;
       })
       .map((p) => {
-        const student = students.find((s) => s.id === p.studentId);
-        const course = courses.find((c) => c.id === p.courseId);
+        const student = studentsById.get(p.studentId);
+        const course = p.courseId ? coursesById.get(p.courseId) : undefined;
       
       const isMonthly = p.type === 'monthly';
       const hasCustomFee = student && student.customMonthlyFee !== undefined && student.customMonthlyFee !== null;
@@ -265,7 +292,7 @@ export default function PaymentsPage() {
         status,
       };
     });
-  }, [payments, students, courses]);
+  }, [payments, studentsById, coursesById]);
 
   // ─── Computations & Stats ───────────────────────────────────────────────────
   const stats = useMemo(() => {
@@ -296,7 +323,7 @@ export default function PaymentsPage() {
 
   const filteredPayments = useMemo(() => {
     return resolvedPayments.filter((p) => {
-      const student = students.find(s => s.id === p.studentId);
+      const student = studentsById.get(p.studentId);
       const studentName = student ? `${student.firstName} ${student.lastName}`.toLowerCase() : '';
 
       const isSearching = searchQuery.trim().length > 0;
@@ -377,10 +404,25 @@ export default function PaymentsPage() {
 
       return matchesSearch && matchesStatus && matchesCourse && matchesMonth;
     });
-  }, [resolvedPayments, searchQuery, statusFilter, courseFilter, monthFilter, students]);
+  }, [resolvedPayments, searchQuery, statusFilter, courseFilter, monthFilter, studentsById]);
 
   // ─── Real-Time Unpaid & Monthly Matrix Computation ──────────────────────────
   const currentAcademicYear = getCurrentAcademicYearString();
+
+  const paymentsByStudentId = useMemo(() => {
+    const map = new Map<string, Payment[]>();
+    for (let i = 0; i < resolvedPayments.length; i++) {
+      const p = resolvedPayments[i];
+      if (!p || !p.studentId) continue;
+      let list = map.get(p.studentId);
+      if (!list) {
+        list = [];
+        map.set(p.studentId, list);
+      }
+      list.push(p);
+    }
+    return map;
+  }, [resolvedPayments]);
 
   const realtimeStudentsCheck = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -397,19 +439,22 @@ export default function PaymentsPage() {
       })
       .sort((a, b) => a.lastName.localeCompare(b.lastName, 'it'))
       .map((s) => {
-        const studentCourses = courses.filter((c) => s.enrolledCourseIds?.includes(c.id));
+        const studentCourses = (s.enrolledCourseIds || [])
+          .map((id) => coursesById.get(id))
+          .filter((c): c is (typeof courses)[0] => Boolean(c));
         const firstCourse = studentCourses[0];
         const expectedFee =
           s.customMonthlyFee !== undefined && s.customMonthlyFee !== null
             ? s.customMonthlyFee
             : (firstCourse?.fee?.monthly || 40);
+        const studentPayments = paymentsByStudentId.get(s.id) || [];
         const monthStatus = getStudentMonthPaymentStatus(
           s.id,
           checkMonth,
-          resolvedPayments,
+          studentPayments,
           currentAcademicYear
         );
-        const regPaid = hasStudentPaidRegistration(s.id, resolvedPayments);
+        const regPaid = hasStudentPaidRegistration(s.id, studentPayments);
         return {
           student: s,
           studentCourses,
@@ -438,7 +483,7 @@ export default function PaymentsPage() {
       paidCount,
       unpaidTotalExpected,
     };
-  }, [students, courses, resolvedPayments, courseFilter, searchQuery, checkMonth, checkStatusFilter, currentAcademicYear]);
+  }, [students, coursesById, paymentsByStudentId, courseFilter, searchQuery, checkMonth, checkStatusFilter, currentAcademicYear]);
 
   const handleDownloadCourseGrids = () => {
     if (isPrintingGrids) return;

@@ -6,6 +6,7 @@ import {
   setDoc,
   updateDoc,
   query,
+  where,
   onSnapshot,
   writeBatch,
   Timestamp,
@@ -36,7 +37,7 @@ function formatFirestoreError(err: unknown, fallbackMsg: string): string {
   return fallbackMsg;
 }
 
-export function usePayments() {
+export function usePayments(academicYearFilter?: string) {
   const user = useAuthStore((s) => s.user);
   const schoolId = user?.schoolId;
 
@@ -58,7 +59,10 @@ export function usePayments() {
 
     setLoadingPayments(true);
 
-    const q = query(collection(db, COLLECTIONS.payments(schoolId)).withConverter(paymentConverter));
+    const baseColl = collection(db, COLLECTIONS.payments(schoolId)).withConverter(paymentConverter);
+    const q = academicYearFilter
+      ? query(baseColl, where('academicYear', '==', academicYearFilter))
+      : query(baseColl);
 
     const unsubscribe = onSnapshot(
       q,
@@ -78,7 +82,7 @@ export function usePayments() {
     return () => {
       unsubscribe();
     };
-  }, [schoolId, user?.role, setPayments, setLoadingPayments]);
+  }, [schoolId, user?.role, academicYearFilter, setPayments, setLoadingPayments]);
 
   // ─── Create Single Payment ──────────────────────────────────────────────────
   async function createPayment(data: Omit<Payment, 'id' | 'schoolId' | 'createdAt' | 'updatedAt'>) {

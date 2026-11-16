@@ -4,51 +4,57 @@ import { Toaster } from 'react-hot-toast';
 import { AppRouter } from './router';
 import { useAuthBootstrap } from './hooks/useAuth';
 import { CookieBanner } from './components/common/CookieBanner';
-import * as Sentry from '@sentry/react';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import './index.css';
 
-// ─── Sentry GDPR-Compliant Initialization ─────────────────────────────────────
+// ─── Sentry GDPR-Compliant Initialization (Dynamic Lazy Import) ───────────────
 const sentryDsn = import.meta.env.VITE_SENTRY_DSN;
 if (sentryDsn) {
-  Sentry.init({
-    dsn: sentryDsn,
-    integrations: [
-      Sentry.browserTracingIntegration(),
-      Sentry.replayIntegration(),
-    ],
-    // Performance Monitoring & Session Replay
-    tracesSampleRate: 0.1,
-    replaysSessionSampleRate: 0.1,
-    replaysOnErrorSampleRate: 1.0,
+  import('@sentry/react')
+    .then((Sentry) => {
+      Sentry.init({
+        dsn: sentryDsn,
+        integrations: [
+          Sentry.browserTracingIntegration(),
+          Sentry.replayIntegration(),
+        ],
+        // Performance Monitoring & Session Replay
+        tracesSampleRate: 0.1,
+        replaysSessionSampleRate: 0.1,
+        replaysOnErrorSampleRate: 1.0,
 
-    // Blindaggio GDPR: Disabilita PII predefinite e indirizzi IP
-    sendDefaultPii: false,
-    
-    beforeSend(event: any) {
-      // 1. Mascheramento esplicito dell'IP nei parametri di rete
-      if (event.request && event.request.headers) {
-        delete event.request.headers['X-Forwarded-For'];
-        delete event.request.headers['x-forwarded-for'];
-      }
+        // Blindaggio GDPR: Disabilita PII predefinite e indirizzi IP
+        sendDefaultPii: false,
 
-      // 2. Scrubbing delle Email del payload
-      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-      
-      // 3. Scrubbing di Token sensibili o credenziali (es. pass, token, jwt, secrets)
-      const tokenRegex = /(token|password|auth|jwt|secret)=([^&\s]+)/gi;
+        beforeSend(event: any) {
+          // 1. Mascheramento esplicito dell'IP nei parametri di rete
+          if (event.request && event.request.headers) {
+            delete event.request.headers['X-Forwarded-For'];
+            delete event.request.headers['x-forwarded-for'];
+          }
 
-      let eventString = JSON.stringify(event);
-      
-      if (emailRegex.test(eventString)) {
-        eventString = eventString.replace(emailRegex, '[REDACTED_EMAIL]');
-      }
-      if (tokenRegex.test(eventString)) {
-        eventString = eventString.replace(tokenRegex, '$1=[REDACTED]');
-      }
+          // 2. Scrubbing delle Email del payload
+          const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 
-      return JSON.parse(eventString);
-    }
-  });
+          // 3. Scrubbing di Token sensibili o credenziali (es. pass, token, jwt, secrets)
+          const tokenRegex = /(token|password|auth|jwt|secret)=([^&\s]+)/gi;
+
+          let eventString = JSON.stringify(event);
+
+          if (emailRegex.test(eventString)) {
+            eventString = eventString.replace(emailRegex, '[REDACTED_EMAIL]');
+          }
+          if (tokenRegex.test(eventString)) {
+            eventString = eventString.replace(tokenRegex, '$1=[REDACTED]');
+          }
+
+          return JSON.parse(eventString);
+        },
+      });
+    })
+    .catch((err) => {
+      console.warn('[Sentry] Lazy load skipped or failed:', err);
+    });
 }
 
 // ─── Auto-Recovery on Deploy (Vite Chunk Preload Errors) ──────────────────────
@@ -107,7 +113,7 @@ if (!root) throw new Error('[DanceFlow] Root element #root not found');
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
-    <Sentry.ErrorBoundary fallback={<FallbackComponent />}>
+    <ErrorBoundary fallback={<FallbackComponent />}>
       <AppBootstrap />
       <CookieBanner />
       <Toaster
@@ -131,6 +137,6 @@ ReactDOM.createRoot(root).render(
           },
         }}
       />
-    </Sentry.ErrorBoundary>
+    </ErrorBoundary>
   </React.StrictMode>
 );

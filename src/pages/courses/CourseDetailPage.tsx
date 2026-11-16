@@ -47,12 +47,10 @@ export default function CourseDetailPage() {
   const { id: courseId } = useParams<{ id: string }>();
   const navigate = useNavigate();
 
-  // Ensure real-time courses, students, and payments subscriptions are active
-  useCourses();
-  useStudents();
-  usePayments();
-  const { editStudent } = useStudents();
+  // Ensure real-time courses, students, and payments subscriptions are active (single listener per collection)
   const { editCourse } = useCourses();
+  const { editStudent } = useStudents();
+  usePayments();
 
   const user = useAuthStore((s) => s.user);
   const isTeacher = user?.role === 'teacher';
