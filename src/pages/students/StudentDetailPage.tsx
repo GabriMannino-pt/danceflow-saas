@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   collection, doc, getDocs, query, where, getDoc,
@@ -2288,15 +2288,19 @@ function PortalInviteModal({
   const [phone, setPhone] = useState(target.phone);
   const [loading, setLoading] = useState(false);
   const [completedInvite, setCompletedInvite] = useState<CompletedInviteState | null>(null);
+  const inviteLockRef = useRef(false);
 
   useEffect(() => {
     setRecipientName(target.recipientName);
     setEmail(target.email);
     setPhone(target.phone);
     setCompletedInvite(null);
+    inviteLockRef.current = false;
   }, [target, isOpen]);
 
   async function handleSendWhatsApp() {
+    if (loading || inviteLockRef.current) return;
+
     const cleanEmail = email.trim().toLowerCase();
     const cleanPhone = phone.trim();
 
@@ -2304,11 +2308,12 @@ function PortalInviteModal({
       toast.error('Inserisci un indirizzo email valido prima di procedere.');
       return;
     }
-    if (!cleanPhone) {
-      toast.error('Inserisci un numero di cellulare per inviare il messaggio WhatsApp.');
+    if (!cleanPhone || cleanPhone.replace(/\D/g, '').length < 6) {
+      toast.error('Inserisci un numero di cellulare valido per inviare il messaggio WhatsApp.');
       return;
     }
 
+    inviteLockRef.current = true;
     setLoading(true);
     try {
       // 1. Provision Auth user with readable initial password and link student + payments + persist contact
@@ -2359,13 +2364,22 @@ function PortalInviteModal({
       });
     } catch (err: unknown) {
       console.error('[PortalInviteModal] WhatsApp error:', err);
-      toast.error((err as Error)?.message || 'Errore durante la configurazione dell\'invito WhatsApp.');
+      const msg = String((err as Error)?.message || '');
+      const isNet = msg.toLowerCase().includes('network') || msg.toLowerCase().includes('offline') || msg.toLowerCase().includes('unavailable');
+      toast.error(
+        isNet
+          ? 'Connessione internet assente o instabile. Verifica la rete e riprova.'
+          : (msg || 'Errore durante la configurazione dell\'invito WhatsApp.')
+      );
     } finally {
+      inviteLockRef.current = false;
       setLoading(false);
     }
   }
 
   async function handleSendEmail() {
+    if (loading || inviteLockRef.current) return;
+
     const cleanEmail = email.trim().toLowerCase();
     const cleanPhone = phone.trim();
 
@@ -2374,6 +2388,7 @@ function PortalInviteModal({
       return;
     }
 
+    inviteLockRef.current = true;
     setLoading(true);
     try {
       // 1. Provision Auth user and link student + payments + persist contact in Firestore
@@ -2399,8 +2414,15 @@ function PortalInviteModal({
       });
     } catch (err: unknown) {
       console.error('[PortalInviteModal] Email error:', err);
-      toast.error((err as Error)?.message || 'Errore durante l\'invio dell\'email di invito.');
+      const msg = String((err as Error)?.message || '');
+      const isNet = msg.toLowerCase().includes('network') || msg.toLowerCase().includes('offline') || msg.toLowerCase().includes('unavailable');
+      toast.error(
+        isNet
+          ? 'Connessione internet assente o instabile. Verifica la rete e riprova.'
+          : (msg || 'Errore durante l\'invio dell\'email di invito.')
+      );
     } finally {
+      inviteLockRef.current = false;
       setLoading(false);
     }
   }
@@ -2459,10 +2481,14 @@ function PortalInviteModal({
                   variant="outline"
                   size="sm"
                   icon={<Copy size={13} />}
-                  onClick={() => {
+                  onClick={async () => {
                     if (completedInvite.message) {
-                      navigator.clipboard.writeText(completedInvite.message);
-                      toast.success('Messaggio WhatsApp copiato negli appunti!');
+                      try {
+                        await navigator.clipboard.writeText(completedInvite.message);
+                        toast.success('Messaggio WhatsApp copiato negli appunti!');
+                      } catch {
+                        toast.error('Copia automatica non autorizzata dal browser. Usa il tasto verde WhatsApp sopra.');
+                      }
                     }
                   }}
                   className="border-white/10 text-white/80 hover:text-white hover:bg-white/5 shrink-0"
@@ -2548,6 +2574,7 @@ function PortalInviteModal({
               disabled={loading}
               fullWidth
               required
+              autoFocus={!target.email}
               hint="Questa email sarà utilizzata come username di accesso al Portale e salvata in anagrafica."
             />
 

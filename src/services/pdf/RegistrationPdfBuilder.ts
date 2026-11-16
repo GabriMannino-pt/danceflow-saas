@@ -65,24 +65,35 @@ export async function generateRegistrationPdf(
   fes: FesMetadata,
   academicYear = '2025/2026'
 ): Promise<{ blob: Blob; hash: string }> {
+  // Defensive sanitization for dirty/legacy/partial data
+  const safeFirstName = (student?.firstName || '').trim() || '—';
+  const safeLastName = (student?.lastName || '').trim() || '—';
+  const safeFiscalCode = (student?.fiscalCode || '').trim().toUpperCase() || '—';
+  const safeGender = (student?.gender || '').trim() || '—';
+  const safeAddr = student?.address || { street: '', city: '', province: '', postalCode: '' };
+  const safeContact = student?.contact || {};
+  const safeSig = typeof signatureBase64 === 'string' ? signatureBase64 : '';
+  const safeTimestamp = fes?.timestamp && Number.isFinite(Number(fes.timestamp)) ? Number(fes.timestamp) : Date.now();
+  const safeFes = {
+    ipAddress: String(fes?.ipAddress || '127.0.0.1').trim() || '127.0.0.1',
+    timestamp: safeTimestamp,
+    userAgent: String(fes?.userAgent || 'Mozilla/5.0').trim() || 'Mozilla/5.0',
+    sessionId: String(fes?.sessionId || 'N/D').trim() || 'N/D',
+  };
+
   // 1. Calculate Hash of the Document Data for integrity auditing
   const documentPayload = JSON.stringify({
     student: {
-      firstName: student.firstName,
-      lastName: student.lastName,
-      fiscalCode: student.fiscalCode,
+      firstName: safeFirstName,
+      lastName: safeLastName,
+      fiscalCode: safeFiscalCode,
     },
-    fes: {
-      ipAddress: fes.ipAddress,
-      timestamp: fes.timestamp,
-      userAgent: fes.userAgent,
-      sessionId: fes.sessionId,
-    },
-    signatureLength: signatureBase64.length,
+    fes: safeFes,
+    signatureLength: safeSig.length,
   });
   
   const docHash = await calculateSHA256(documentPayload);
-  const formattedDate = format(new Date(fes.timestamp), 'dd/MM/yyyy HH:mm:ss.SSS', { locale: it });
+  const formattedDate = format(new Date(safeFes.timestamp), 'dd/MM/yyyy HH:mm:ss.SSS', { locale: it });
 
   // 2. Initialize jsPDF
   const doc = new jsPDF({
@@ -180,22 +191,22 @@ export async function generateRegistrationPdf(
     }
   }
 
-  doc.text(`Cognome: ${student.lastName}`, 25, 78);
-  doc.text(`Nome: ${student.firstName}`, 90, 78);
-  doc.text(`Genere: ${student.gender || '—'}`, 150, 78);
+  doc.text(`Cognome: ${safeLastName}`, 25, 78);
+  doc.text(`Nome: ${safeFirstName}`, 90, 78);
+  doc.text(`Genere: ${safeGender}`, 150, 78);
 
   doc.text(`Data di Nascita: ${birthDateStr}`, 25, 84);
-  doc.text(`Codice Fiscale: ${student.fiscalCode || '—'}`, 90, 84);
+  doc.text(`Codice Fiscale: ${safeFiscalCode}`, 90, 84);
 
-  const addressStr = `${student.address.street || '—'}, ${student.address.postalCode || ''} ${student.address.city || ''} (${student.address.province || ''})`;
+  const addressStr = `${(safeAddr.street || '').trim() || '—'}, ${(safeAddr.postalCode || '').trim()} ${(safeAddr.city || '').trim()} (${(safeAddr.province || '').trim()})`.replace(/\(\s*\)/, '').trim();
   doc.text(`Indirizzo Residenza: ${addressStr}`, 25, 90);
   
-  doc.text(`Telefono Allievo: ${student.contact.studentPhone || '—'}`, 25, 96);
-  doc.text(`Email Allievo: ${student.contact.studentEmail || '—'}`, 90, 96);
+  doc.text(`Telefono Allievo: ${(safeContact.studentPhone || '').trim() || '—'}`, 25, 96);
+  doc.text(`Email Allievo: ${(safeContact.studentEmail || '').trim() || '—'}`, 90, 96);
 
   // --- PARENT / GUARDIAN (only if minor or guardian distinct from student) ---
   let isMinor = false;
-  if (student.dateOfBirth) {
+  if (student?.dateOfBirth) {
     try {
       const dob = typeof student.dateOfBirth.toDate === 'function'
         ? student.dateOfBirth.toDate()
@@ -207,11 +218,11 @@ export async function generateRegistrationPdf(
       isMinor = false;
     }
   }
-  const studentFullNameLower = `${student.firstName} ${student.lastName}`.trim().toLowerCase();
-  const parentCleanNameLower = (student.contact.parentName || '').trim().toLowerCase();
+  const studentFullNameLower = `${safeFirstName} ${safeLastName}`.trim().toLowerCase();
+  const parentCleanNameLower = (safeContact.parentName || '').trim().toLowerCase();
   const hasDistinctGuardian = Boolean(
     parentCleanNameLower &&
-    student.contact.parentRelation !== 'allievo' &&
+    safeContact.parentRelation !== 'allievo' &&
     parentCleanNameLower !== studentFullNameLower
   );
 
@@ -229,9 +240,9 @@ export async function generateRegistrationPdf(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.setTextColor(50, 50, 50);
-    doc.text(`Nominativo: ${student.contact.parentName || '—'} (${student.contact.parentRelation || 'Genitore'})`, 25, yOffset + 12);
-    doc.text(`Telefono Genitore: ${student.contact.parentPhone || '—'}`, 25, yOffset + 18);
-    doc.text(`Email Genitore: ${student.contact.parentEmail || '—'}`, 90, yOffset + 18);
+    doc.text(`Nominativo: ${(safeContact.parentName || '').trim() || '—'} (${(safeContact.parentRelation || '').trim() || 'Genitore'})`, 25, yOffset + 12);
+    doc.text(`Telefono Genitore: ${(safeContact.parentPhone || '').trim() || '—'}`, 25, yOffset + 18);
+    doc.text(`Email Genitore: ${(safeContact.parentEmail || '').trim() || '—'}`, 90, yOffset + 18);
     
     yOffset += 30;
   }
@@ -263,14 +274,14 @@ export async function generateRegistrationPdf(
   doc.text('Firma digitale per presa visione e consenso:', 20, sigY);
 
   const resolvedSignerName =
-    (isMinor || hasDistinctGuardian) && student.contact?.parentName
-      ? student.contact.parentName
-      : `${student.firstName} ${student.lastName}`;
+    (isMinor || hasDistinctGuardian) && safeContact.parentName?.trim()
+      ? safeContact.parentName.trim()
+      : `${safeFirstName} ${safeLastName}`;
 
   // Add signature image (Base64 PNG) or cursive signature fallback
   try {
-    const imgData = signatureBase64 && typeof signatureBase64 === 'string' && signatureBase64.trim().length > 50
-      ? (signatureBase64.startsWith('data:image') ? signatureBase64 : `data:image/png;base64,${signatureBase64}`)
+    const imgData = safeSig.trim().length > 50
+      ? (safeSig.startsWith('data:image') ? safeSig : `data:image/png;base64,${safeSig}`)
       : null;
 
     if (imgData) {
@@ -314,16 +325,16 @@ export async function generateRegistrationPdf(
   doc.setFontSize(6.5);
   doc.setTextColor(100, 100, 100);
   
-  doc.text(`TIMESTAMP: ${formattedDate} (${fes.timestamp} ms)`, 23, fesY + 8);
-  doc.text(`CLIENT IP: ${fes.ipAddress}`, 23, fesY + 11);
+  doc.text(`TIMESTAMP: ${formattedDate} (${safeFes.timestamp} ms)`, 23, fesY + 8);
+  doc.text(`CLIENT IP: ${safeFes.ipAddress}`, 23, fesY + 11);
   
   const maxUaLen = 90;
-  const uaText = fes.userAgent.length > maxUaLen 
-    ? `${fes.userAgent.substring(0, maxUaLen)}...` 
-    : fes.userAgent;
+  const uaText = safeFes.userAgent.length > maxUaLen 
+    ? `${safeFes.userAgent.substring(0, maxUaLen)}...` 
+    : safeFes.userAgent;
   doc.text(`USER AGENT: ${uaText}`, 23, fesY + 14);
   
-  doc.text(`SESSION ID: ${fes.sessionId}`, 23, fesY + 17);
+  doc.text(`SESSION ID: ${safeFes.sessionId}`, 23, fesY + 17);
   
   // Right aligned metadata values
   doc.text(`SHA-256 HASH INTEGRITÀ DOCUMENTO:`, 110, fesY + 8);

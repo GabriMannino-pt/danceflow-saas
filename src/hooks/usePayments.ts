@@ -19,6 +19,23 @@ import type { Payment, PaymentMethod } from '@/types';
 import { getNextReceiptNumber } from '@/services/receiptService';
 import toast from 'react-hot-toast';
 
+function formatFirestoreError(err: unknown, fallbackMsg: string): string {
+  const code = String((err as { code?: string })?.code || '').toLowerCase();
+  const message = String((err as { message?: string })?.message || '').toLowerCase();
+  if (
+    code.includes('unavailable') ||
+    code.includes('network') ||
+    message.includes('offline') ||
+    message.includes('network')
+  ) {
+    return 'Connessione internet assente o instabile. Verifica la rete e riprova.';
+  }
+  if (code.includes('permission-denied')) {
+    return 'Permessi insufficienti per completare l\'operazione. Effettua nuovamente l\'accesso.';
+  }
+  return fallbackMsg;
+}
+
 export function usePayments() {
   const user = useAuthStore((s) => s.user);
   const schoolId = user?.schoolId;
@@ -204,12 +221,25 @@ export function usePayments() {
         }
       }
 
-      await updateDoc(ref, removeUndefined(updates));
+      const prevPaymentsSnapshot = useSchoolStore.getState().payments;
+      useSchoolStore.setState((state) => ({
+        payments: state.payments.map((item) =>
+          item.id === paymentId ? { ...item, ...updates } : item
+        ),
+      }));
+
+      try {
+        await updateDoc(ref, removeUndefined(updates));
+      } catch (writeErr) {
+        useSchoolStore.setState({ payments: prevPaymentsSnapshot });
+        throw writeErr;
+      }
+
       toast.success(status === 'paid' ? 'Pagamento saldato!' : 'Acconto registrato con successo!');
       return { updates: { ...p, ...updates }, newInstallment };
     } catch (err) {
       console.error('[usePayments] registerInstallment error:', err);
-      toast.error('Errore durante la registrazione del versamento.');
+      toast.error(formatFirestoreError(err, 'Errore durante la registrazione del versamento.'));
       throw err;
     }
   }
@@ -480,19 +510,28 @@ export function usePayments() {
   // ─── Annulla Quota ─────────────────────────────────────────────────────────
   async function cancelPayment(paymentId: string, reason: string) {
     if (!schoolId) throw new Error('Not authenticated to a school');
+    const prevPaymentsSnapshot = useSchoolStore.getState().payments;
     try {
       const ref = doc(db, COLLECTIONS.payments(schoolId), paymentId).withConverter(paymentConverter);
       const updates: Partial<Payment> = {
         status: 'cancelled',
-        notes: reason,
+        notes: reason.trim(),
         updatedAt: nowTimestamp(),
       };
+
+      // Optimistic UI
+      useSchoolStore.setState((state) => ({
+        payments: state.payments.map((item) =>
+          item.id === paymentId ? { ...item, ...updates } : item
+        ),
+      }));
 
       await updateDoc(ref, removeUndefined(updates));
       toast.success('Quota annullata con successo!');
     } catch (err) {
+      useSchoolStore.setState({ payments: prevPaymentsSnapshot });
       console.error('[usePayments] cancelPayment error:', err);
-      toast.error('Errore durante l\'annullamento della quota.');
+      toast.error(formatFirestoreError(err, 'Errore durante l\'annullamento della quota.'));
       throw err;
     }
   }
@@ -500,13 +539,21 @@ export function usePayments() {
   // ─── Elimina Pagamento Fisicamente ─────────────────────────────────────────
   async function deletePayment(paymentId: string) {
     if (!schoolId) throw new Error('Not authenticated to a school');
+    const prevPaymentsSnapshot = useSchoolStore.getState().payments;
     try {
       const ref = doc(db, COLLECTIONS.payments(schoolId), paymentId).withConverter(paymentConverter);
+
+      // Optimistic UI
+      useSchoolStore.setState((state) => ({
+        payments: state.payments.filter((item) => item.id !== paymentId),
+      }));
+
       await deleteDoc(ref);
       toast.success('Pagamento eliminato con successo!');
     } catch (err) {
+      useSchoolStore.setState({ payments: prevPaymentsSnapshot });
       console.error('[usePayments] deletePayment error:', err);
-      toast.error('Errore durante l\'eliminazione del pagamento.');
+      toast.error(formatFirestoreError(err, 'Errore durante l\'eliminazione del pagamento.'));
       throw err;
     }
   }
@@ -620,7 +667,17 @@ export function usePayments() {
     emitReceipt: boolean;
   }) {
     if (!schoolId) throw new Error('Not authenticated to a school');
+    const prevPaymentsSnapshot = useSchoolStore.getState().payments;
     try {
+      const cleanAmount = Math.round(Number(data.amount) * 100) / 100;
+      if (!Number.isFinite(cleanAmount) || cleanAmount <= 0) {
+        toast.error('Importo del pagamento non valido.');
+        throw new Error('Importo del pagamento non valido.');
+      }
+      const validDate = data.date instanceof Date && !isNaN(data.date.getTime()) ? data.date : new Date();
+      const cleanDesc = (data.description || '').trim() || 'Pagamento quota scuola';
+      const cleanNotes = data.notes?.trim() || undefined;
+
       const student = students.find((s) => s.id === data.studentId);
       const parentId = student?.parentId;
 
@@ -630,15 +687,15 @@ export function usePayments() {
       }
 
       const paymentRef = doc(collection(db, COLLECTIONS.payments(schoolId))).withConverter(paymentConverter);
-      const timestampDate = Timestamp.fromDate(data.date);
+      const timestampDate = Timestamp.fromDate(validDate);
 
       const installment = {
-        amount: data.amount,
+        amount: cleanAmount,
         date: timestampDate,
         method: data.method,
         receiptEmitted: data.emitReceipt,
         receiptUrl: receiptNumber ? `generated://receipt/${receiptNumber}` : undefined,
-        notes: data.notes || undefined,
+        notes: cleanNotes,
       };
 
       const primaryMonth = data.month || (data.months && data.months.length > 0 ? data.months[0] : undefined);
@@ -653,10 +710,10 @@ export function usePayments() {
         month: primaryMonth,
         months: data.months,
         year: data.year || new Date().getFullYear(),
-        description: data.description.trim(),
-        amount: data.amount,
-        totalAmount: data.amount,
-        paidAmount: data.amount,
+        description: cleanDesc,
+        amount: cleanAmount,
+        totalAmount: cleanAmount,
+        paidAmount: cleanAmount,
         remainingAmount: 0,
         currency: 'EUR',
         status: 'paid',
@@ -664,66 +721,85 @@ export function usePayments() {
         dueDate: timestampDate,
         method: data.method,
         receiptNumber,
-        notes: data.notes?.trim() || undefined,
+        notes: cleanNotes,
         payments: [installment],
         createdAt: nowTimestamp(),
         updatedAt: nowTimestamp(),
       };
 
-      await setDoc(paymentRef, newPayment);
+      // Optimistic UI update so the grid / table updates instantaneously
+      useSchoolStore.setState((state) => ({
+        payments: [newPayment, ...state.payments.filter((item) => item.id !== newPayment.id)],
+      }));
 
-      // If multi-month or monthly payment, also settle any existing pending fees for this student/months
+      try {
+        await setDoc(paymentRef, newPayment);
+      } catch (writeErr) {
+        // Rollback optimistic insertion on failure
+        useSchoolStore.setState({ payments: prevPaymentsSnapshot });
+        throw writeErr;
+      }
+
+      // Secondary: settle any existing pending fees for these months (non-fatal if offline/partial)
       const monthsToSettle = data.months || (data.month ? [data.month] : []);
       if (data.type === 'monthly' && monthsToSettle.length > 0) {
-        const batch = writeBatch(db);
-        let hasBatchUpdates = false;
-        payments.forEach((p) => {
-          if (
-            p.id !== paymentRef.id &&
-            p.studentId === data.studentId &&
-            p.type === 'monthly' &&
-            p.year === (data.year || new Date().getFullYear()) &&
-            p.month &&
-            monthsToSettle.includes(p.month) &&
-            p.status !== 'paid' &&
-            p.status !== 'cancelled'
-          ) {
-            const pRef = doc(db, COLLECTIONS.payments(schoolId), p.id);
-            batch.update(pRef, {
-              status: 'paid',
-              paidAmount: p.totalAmount ?? p.amount,
-              remainingAmount: 0,
-              paidAt: timestampDate,
-              notes: `Saldato con Ricevuta N° ${receiptNumber || 'N/D'}`,
-              updatedAt: nowTimestamp(),
-            });
-            hasBatchUpdates = true;
+        try {
+          const batch = writeBatch(db);
+          let hasBatchUpdates = false;
+          payments.forEach((p) => {
+            if (
+              p.id !== paymentRef.id &&
+              p.studentId === data.studentId &&
+              p.type === 'monthly' &&
+              p.year === (data.year || new Date().getFullYear()) &&
+              p.month &&
+              monthsToSettle.includes(p.month) &&
+              p.status !== 'paid' &&
+              p.status !== 'cancelled'
+            ) {
+              const pRef = doc(db, COLLECTIONS.payments(schoolId), p.id);
+              batch.update(pRef, {
+                status: 'paid',
+                paidAmount: p.totalAmount ?? p.amount,
+                remainingAmount: 0,
+                paidAt: timestampDate,
+                notes: `Saldato con Ricevuta N° ${receiptNumber || 'N/D'}`,
+                updatedAt: nowTimestamp(),
+              });
+              hasBatchUpdates = true;
+            }
+          });
+          if (hasBatchUpdates) {
+            await batch.commit();
           }
-        });
-        if (hasBatchUpdates) {
-          await batch.commit();
+        } catch (batchErr) {
+          console.warn('[usePayments] Non-fatal pending fee backfill error:', batchErr);
         }
       }
 
-      // If registration fee, update student
+      // Secondary: update registration flag on student (non-fatal)
       if (data.type === 'registration') {
-        const studentRef = doc(db, COLLECTIONS.students(schoolId), data.studentId);
-        await updateDoc(studentRef, {
-          registrationFeePaid: true,
-          registrationFeePaidAt: timestampDate,
-          updatedAt: nowTimestamp(),
-        });
+        try {
+          const studentRef = doc(db, COLLECTIONS.students(schoolId), data.studentId);
+          await updateDoc(studentRef, {
+            registrationFeePaid: true,
+            registrationFeePaidAt: timestampDate,
+            updatedAt: nowTimestamp(),
+          });
+        } catch (regErr) {
+          console.warn('[usePayments] Non-fatal registration flag update error:', regErr);
+        }
       }
 
       toast.success(
         receiptNumber 
-          ? `Pagamento di €${data.amount.toFixed(2)} registrato! (Ricevuta n. ${receiptNumber})`
-          : `Pagamento di €${data.amount.toFixed(2)} registrato con successo!`
+          ? `Pagamento di €${cleanAmount.toFixed(2)} registrato! (Ricevuta n. ${receiptNumber})`
+          : `Pagamento di €${cleanAmount.toFixed(2)} registrato con successo!`
       );
       return { payment: newPayment, installment };
     } catch (err) {
       console.error('[usePayments] registerDirectPayment error:', err);
-      toast.error('Errore durante la registrazione del pagamento.');
+      toast.error(formatFirestoreError(err, 'Errore durante la registrazione del pagamento.'));
       throw err;
     }
   }

@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { usePayments } from '@/hooks/usePayments';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -141,6 +141,8 @@ export default function PaymentsPage() {
   const [editReceiptAmount, setEditReceiptAmount] = useState<number>(0);
   const [editReceiptNotes, setEditReceiptNotes] = useState<string>('');
   const [isSubmittingEditReceipt, setIsSubmittingEditReceipt] = useState<boolean>(false);
+  const [isPrintingGrids, setIsPrintingGrids] = useState<boolean>(false);
+  const actionLockRef = useRef(false);
 
   const handleOpenEditReceipt = (payment: Payment) => {
     setEditingReceiptPayment(payment);
@@ -159,9 +161,10 @@ export default function PaymentsPage() {
 
   const handleSaveEditReceipt = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!editingReceiptPayment) return;
+    if (!editingReceiptPayment || isSubmittingEditReceipt || actionLockRef.current) return;
 
-    if (editReceiptAmount <= 0) {
+    const cleanAmt = Math.round(Number(editReceiptAmount) * 100) / 100;
+    if (!Number.isFinite(cleanAmt) || editReceiptAmount <= 0 || cleanAmt <= 0 || cleanAmt > 50000) {
       toast.error('L\'importo della ricevuta deve essere maggiore di zero.');
       return;
     }
@@ -169,17 +172,19 @@ export default function PaymentsPage() {
       toast.error('La causale / descrizione della ricevuta è obbligatoria.');
       return;
     }
+    const validEditDate = editReceiptDate && !isNaN(Date.parse(editReceiptDate)) ? new Date(editReceiptDate) : new Date();
 
+    actionLockRef.current = true;
     try {
       setIsSubmittingEditReceipt(true);
       await updateReceiptPayment(editingReceiptPayment.id, {
         method: editReceiptMethod,
-        paidAt: new Date(editReceiptDate),
-        dueDate: new Date(editReceiptDate),
+        paidAt: validEditDate,
+        dueDate: validEditDate,
         description: editReceiptDescription.trim(),
         month: editReceiptMonth,
         year: editReceiptYear,
-        amount: Number(editReceiptAmount),
+        amount: cleanAmt,
         notes: editReceiptNotes.trim() || undefined,
       });
       toast.success(`Ricevuta N° ${editingReceiptPayment.receiptNumber} aggiornata con successo (numero conservato)`);
@@ -187,6 +192,7 @@ export default function PaymentsPage() {
     } catch (err) {
       console.error('[PaymentsPage] handleSaveEditReceipt error:', err);
     } finally {
+      actionLockRef.current = false;
       setIsSubmittingEditReceipt(false);
     }
   };
@@ -435,6 +441,8 @@ export default function PaymentsPage() {
   }, [students, courses, resolvedPayments, courseFilter, searchQuery, checkMonth, checkStatusFilter, currentAcademicYear]);
 
   const handleDownloadCourseGrids = () => {
+    if (isPrintingGrids) return;
+    setIsPrintingGrids(true);
     try {
       const targetCourses = courseFilter === 'all'
         ? courses
@@ -457,6 +465,8 @@ export default function PaymentsPage() {
     } catch (err) {
       console.error('[PaymentsPage] handleDownloadCourseGrids error:', err);
       toast.error('Errore durante la generazione delle griglie PDF.');
+    } finally {
+      setIsPrintingGrids(false);
     }
   };
 
@@ -842,10 +852,12 @@ export default function PaymentsPage() {
               <Button
                 variant="outline"
                 onClick={handleDownloadCourseGrids}
+                loading={isPrintingGrids}
+                disabled={isPrintingGrids}
                 icon={<Printer size={18} />}
                 title="Scarica il Registro PDF di tutti i corsi già compilato con i pagamenti ricevuti"
               >
-                Stampa Griglie Corsi (PDF)
+                {isPrintingGrids ? 'Generazione...' : 'Stampa Griglie Corsi (PDF)'}
               </Button>
               <Button
                 variant="outline"
@@ -981,9 +993,11 @@ export default function PaymentsPage() {
                     size="sm"
                     variant="outline"
                     onClick={handleDownloadCourseGrids}
+                    loading={isPrintingGrids}
+                    disabled={isPrintingGrids}
                     icon={<Printer size={14} />}
                   >
-                    Scarica Griglie PDF Compilate
+                    {isPrintingGrids ? 'Generazione...' : 'Scarica Griglie PDF Compilate'}
                   </Button>
                 </div>
               </div>

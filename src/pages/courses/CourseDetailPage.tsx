@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -64,6 +64,9 @@ export default function CourseDetailPage() {
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [selectedStudentToAdd, setSelectedStudentToAdd] = useState('');
   const [teacher, setTeacher] = useState<AppUser | null>(null);
+  const [isExportingGrid, setIsExportingGrid] = useState(false);
+  const [isMutatingEnrollment, setIsMutatingEnrollment] = useState(false);
+  const enrollmentLockRef = useRef(false);
   const [quickPayModal, setQuickPayModal] = useState<{
     isOpen: boolean;
     studentId?: string;
@@ -86,48 +89,117 @@ export default function CourseDetailPage() {
       .sort((a, b) => a.lastName.localeCompare(b.lastName, 'it'));
   }, [students, course]);
 
+  const getCourseErrorMessage = (err: any, networkMsg: string, fallback: string) => {
+    const isNetwork =
+      err?.code === 'unavailable' ||
+      /network|offline|fetch|timeout|failed to get/i.test(err?.message || '');
+    return isNetwork ? networkMsg : fallback;
+  };
+
   const handleRemoveStudentFromCourse = async (studentId: string, studentName: string) => {
+    if (enrollmentLockRef.current || !course) return;
     const confirmed = window.confirm(`Vuoi rimuovere ${studentName} da questo corso (${course?.name})?`);
-    if (!confirmed || !course) return;
+    if (!confirmed) return;
+
+    const st = students.find((s) => s.id === studentId);
+    if (!st) {
+      toast.error('Allievo non trovato.');
+      return;
+    }
+
+    const prevEnrolledIds = [...(st.enrolledCourseIds || [])];
+    const prevEnrolledCount = course.enrolledCount ?? enrolledStudents.length;
+    const updatedIds = prevEnrolledIds.filter((id) => id !== course.id);
+    const nextCount = Math.max(0, prevEnrolledCount - 1);
+
+    enrollmentLockRef.current = true;
+    setIsMutatingEnrollment(true);
+
+    // Optimistic UI: aggiorna subito la vista del gruppo prima della risposta di Firestore
+    useSchoolStore.getState().updateStudent(studentId, { enrolledCourseIds: updatedIds });
+    useSchoolStore.getState().updateCourse(course.id, { enrolledCount: nextCount });
+
     try {
-      const st = students.find((s) => s.id === studentId);
-      if (!st) return;
-      const updated = (st.enrolledCourseIds || []).filter((id) => id !== course.id);
-      await editStudent(studentId, { enrolledCourseIds: updated });
-      await editCourse(course.id, { enrolledCount: Math.max(0, (course.enrolledCount || 1) - 1) });
+      await editStudent(studentId, { enrolledCourseIds: updatedIds });
+      await editCourse(course.id, { enrolledCount: nextCount });
       toast.success(`${studentName} rimosso/a dal corso.`);
-    } catch (err) {
+    } catch (err: any) {
+      // Rollback stato locale in caso di errore di rete o permessi
+      useSchoolStore.getState().updateStudent(studentId, { enrolledCourseIds: prevEnrolledIds });
+      useSchoolStore.getState().updateCourse(course.id, { enrolledCount: prevEnrolledCount });
       console.error('Error removing student from course:', err);
-      toast.error('Impossibile rimuovere l\'allievo dal corso.');
+      toast.error(
+        getCourseErrorMessage(
+          err,
+          'Connessione internet assente o instabile. Rimozione annullata, riprova tra qualche secondo.',
+          'Impossibile rimuovere l\'allievo dal corso. Riprova.'
+        )
+      );
+    } finally {
+      enrollmentLockRef.current = false;
+      setIsMutatingEnrollment(false);
     }
   };
 
   const handleAddStudentToCourse = async () => {
-    if (!selectedStudentToAdd || !course) return;
+    if (enrollmentLockRef.current || !selectedStudentToAdd || !course) return;
+    const st = students.find((s) => s.id === selectedStudentToAdd);
+    if (!st) {
+      toast.error('Allievo selezionato non trovato.');
+      return;
+    }
+
+    const prevEnrolledIds = [...(st.enrolledCourseIds || [])];
+    if (prevEnrolledIds.includes(course.id)) {
+      toast.error('Questo allievo è già iscritto al corso.');
+      return;
+    }
+
+    const prevEnrolledCount = course.enrolledCount ?? enrolledStudents.length;
+    const nextIds = [...prevEnrolledIds, course.id];
+    const nextCount = prevEnrolledCount + 1;
+
+    enrollmentLockRef.current = true;
+    setIsMutatingEnrollment(true);
+
+    // Optimistic UI
+    useSchoolStore.getState().updateStudent(selectedStudentToAdd, { enrolledCourseIds: nextIds });
+    useSchoolStore.getState().updateCourse(course.id, { enrolledCount: nextCount });
+
     try {
-      const st = students.find((s) => s.id === selectedStudentToAdd);
-      if (!st) return;
-      const current = st.enrolledCourseIds || [];
-      if (current.includes(course.id)) return;
-      await editStudent(selectedStudentToAdd, { enrolledCourseIds: [...current, course.id] });
-      await editCourse(course.id, { enrolledCount: (course.enrolledCount || 0) + 1 });
-      toast.success(`${st.firstName} ${st.lastName} aggiunto/a al corso con successo!`);
+      await editStudent(selectedStudentToAdd, { enrolledCourseIds: nextIds });
+      await editCourse(course.id, { enrolledCount: nextCount });
+      const studentLabel = `${st.firstName?.trim() || ''} ${st.lastName?.trim() || ''}`.trim() || 'Allievo';
+      toast.success(`${studentLabel} aggiunto/a al corso con successo!`);
       setSelectedStudentToAdd('');
       setIsAddModalOpen(false);
-    } catch (err) {
+    } catch (err: any) {
+      useSchoolStore.getState().updateStudent(selectedStudentToAdd, { enrolledCourseIds: prevEnrolledIds });
+      useSchoolStore.getState().updateCourse(course.id, { enrolledCount: prevEnrolledCount });
       console.error('Error adding student to course:', err);
-      toast.error('Impossibile aggiungere l\'allievo al corso.');
+      toast.error(
+        getCourseErrorMessage(
+          err,
+          'Connessione internet assente o instabile. Iscrizione non salvata, riprova.',
+          'Impossibile aggiungere l\'allievo al corso. Riprova.'
+        )
+      );
+    } finally {
+      enrollmentLockRef.current = false;
+      setIsMutatingEnrollment(false);
     }
   };
 
   const currentAcademicYear = getCurrentAcademicYearString();
 
   const handleExportRegister = () => {
+    if (isExportingGrid) return;
     if (!activeSchool) {
       toast.error('Scuola non selezionata.');
       return;
     }
     if (!course) return;
+    setIsExportingGrid(true);
     try {
       const doc = generateCourseAttendanceGridPDF(
         course,
@@ -137,11 +209,14 @@ export default function CourseDetailPage() {
         currentAcademicYear,
         payments
       );
-      doc.save(`Registro_Quote_${course.name.replace(/\s+/g, '_')}.pdf`);
+      const safeName = (course.name || 'Corso').trim().replace(/\s+/g, '_') || 'Corso';
+      doc.save(`Registro_Quote_${safeName}.pdf`);
       toast.success('Registro corso con pagamenti scaricato!');
     } catch (err) {
       console.error('[CourseDetail] Export register PDF error:', err);
-      toast.error('Impossibile generare il PDF.');
+      toast.error('Impossibile generare il PDF del registro corso.');
+    } finally {
+      setIsExportingGrid(false);
     }
   };
 
@@ -356,7 +431,14 @@ export default function CourseDetailPage() {
                     Iscrivi Allievo
                   </Button>
                   {enrolledStudents.length > 0 && (
-                    <Button size="sm" variant="secondary" onClick={handleExportRegister} icon={<Download size={14} />}>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={handleExportRegister}
+                      loading={isExportingGrid}
+                      disabled={isExportingGrid}
+                      icon={<Download size={14} />}
+                    >
                       Scarica Registro PDF
                     </Button>
                   )}
@@ -385,8 +467,8 @@ export default function CourseDetailPage() {
                           className="flex items-center gap-4 cursor-pointer flex-1 min-w-0"
                           onClick={() => navigate(`/students/${st.id}`)}
                         >
-                          <div className="w-10 h-10 rounded-full bg-brand-500/20 text-brand-300 font-bold flex items-center justify-center flex-shrink-0">
-                            {st.firstName[0]}{st.lastName[0]}
+                          <div className="w-10 h-10 rounded-full bg-brand-500/20 text-brand-300 font-bold flex items-center justify-center flex-shrink-0 uppercase">
+                            {`${st.firstName?.trim()?.[0] || ''}${st.lastName?.trim()?.[0] || ''}` || 'A'}
                           </div>
                           <div className="min-w-0">
                             <p className="font-semibold text-white group-hover:text-brand-300 transition-colors truncate uppercase">
@@ -405,9 +487,10 @@ export default function CourseDetailPage() {
                             size="xs"
                             variant="outline"
                             className="border-coral-500/30 text-coral-400 hover:bg-coral-500/15 hover:border-coral-500/60 transition-all"
+                            disabled={isMutatingEnrollment}
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleRemoveStudentFromCourse(st.id, `${st.firstName} ${st.lastName}`);
+                              handleRemoveStudentFromCourse(st.id, `${st.firstName?.trim() || ''} ${st.lastName?.trim() || ''}`.trim() || 'Allievo');
                             }}
                             title="Rimuovi da questo corso"
                             icon={<UserMinus size={13} />}
@@ -451,12 +534,17 @@ export default function CourseDetailPage() {
                     )}
                   </div>
                   <ModalFooter>
-                    <Button variant="secondary" onClick={() => setIsAddModalOpen(false)}>
+                    <Button
+                      variant="secondary"
+                      disabled={isMutatingEnrollment}
+                      onClick={() => setIsAddModalOpen(false)}
+                    >
                       Annulla
                     </Button>
                     <Button
                       variant="primary"
-                      disabled={!selectedStudentToAdd}
+                      disabled={!selectedStudentToAdd || isMutatingEnrollment}
+                      loading={isMutatingEnrollment}
                       onClick={handleAddStudentToCourse}
                     >
                       Conferma Iscrizione
@@ -528,6 +616,8 @@ export default function CourseDetailPage() {
                       size="sm"
                       variant="outline"
                       onClick={handleExportRegister}
+                      loading={isExportingGrid}
+                      disabled={isExportingGrid}
                       icon={<Download size={14} />}
                     >
                       Scarica Griglia Pagamenti PDF

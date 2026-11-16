@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { usePayments } from '@/hooks/usePayments';
 import { useSchoolStore } from '@/stores/schoolStore';
 import { Modal, ModalFooter, Input, Select, Button, Badge } from '@/components/ui';
@@ -54,6 +54,7 @@ export function QuickPaymentModal({
   const [notes, setNotes] = useState<string>('');
   const [emitReceipt, setEmitReceipt] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const submitLockRef = useRef(false);
 
   // Active students
   const activeStudents = useMemo(() => {
@@ -168,15 +169,23 @@ export function QuickPaymentModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Protezione nativa double-click (synchronous lock)
+    if (submitting || submitLockRef.current) return;
+
     if (!selectedStudent) {
-      toast.error('Seleziona un allievo.');
-      return;
-    }
-    if (!amount || amount <= 0) {
-      toast.error('Inserisci un importo valido.');
+      toast.error('Seleziona un allievo prima di registrare.');
       return;
     }
 
+    const cleanAmount = Math.round(Number(amount) * 100) / 100;
+    if (!Number.isFinite(cleanAmount) || cleanAmount <= 0 || cleanAmount > 50000) {
+      toast.error('Inserisci un importo valido (compreso tra €0,50 e €50.000).');
+      return;
+    }
+
+    const parsedDate = date && !isNaN(Date.parse(date)) ? new Date(date) : new Date();
+
+    submitLockRef.current = true;
     setSubmitting(true);
     try {
       const courseObj = courses.find((c) => c.id === selectedCourseId);
@@ -202,9 +211,9 @@ export function QuickPaymentModal({
         months: selectedMonths,
         year,
         description,
-        amount: Number(amount),
+        amount: cleanAmount,
         method,
-        date: new Date(date),
+        date: parsedDate,
         notes: notes.trim() || undefined,
         emitReceipt,
       });
@@ -222,6 +231,7 @@ export function QuickPaymentModal({
           doc.save(`Ricevuta_${res.payment.receiptNumber || res.payment.id}.pdf`);
         } catch (pdfErr) {
           console.error('[QuickPaymentModal] PDF generation error:', pdfErr);
+          toast.error('Pagamento registrato, ma si è verificato un errore nella creazione del PDF ricevuta.');
         }
       }
 
@@ -230,6 +240,7 @@ export function QuickPaymentModal({
     } catch (err: any) {
       console.error('[QuickPaymentModal] Error:', err);
     } finally {
+      submitLockRef.current = false;
       setSubmitting(false);
     }
   };
@@ -253,7 +264,7 @@ export function QuickPaymentModal({
             <div className="p-3 bg-brand-500/10 border border-brand-500/30 rounded-xl flex items-center justify-between gap-3">
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-lg bg-brand-500/20 text-brand-300 flex items-center justify-center font-bold text-xs">
-                  {selectedStudent.firstName[0]}{selectedStudent.lastName[0]}
+                  {(selectedStudent.firstName?.trim()?.[0] || 'A').toUpperCase()}{(selectedStudent.lastName?.trim()?.[0] || '').toUpperCase()}
                 </div>
                 <div>
                   <p className="text-sm font-bold text-white">
@@ -317,8 +328,9 @@ export function QuickPaymentModal({
           <div className="grid grid-cols-2 gap-2">
             <button
               type="button"
+              disabled={submitting}
               onClick={() => setPaymentType('monthly')}
-              className={`p-2.5 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+              className={`p-2.5 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 ${
                 paymentType === 'monthly'
                   ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20 border-brand-400/40'
                   : 'bg-black/20 border-white/10 text-white/60 hover:text-white'
@@ -329,8 +341,9 @@ export function QuickPaymentModal({
             </button>
             <button
               type="button"
+              disabled={submitting}
               onClick={() => setPaymentType('registration')}
-              className={`p-2.5 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+              className={`p-2.5 rounded-xl border text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 ${
                 paymentType === 'registration'
                   ? 'bg-brand-500 text-white shadow-lg shadow-brand-500/20 border-brand-400/40'
                   : 'bg-black/20 border-white/10 text-white/60 hover:text-white'
@@ -416,9 +429,12 @@ export function QuickPaymentModal({
               type="number"
               step="0.50"
               min="0.50"
-              value={amount.toString()}
+              max="50000"
+              value={Number.isFinite(amount) ? amount.toString() : ''}
               onChange={(e) => setAmount(parseFloat(e.target.value) || 0)}
               required
+              disabled={submitting}
+              autoFocus={Boolean(initialStudentId)}
               className="text-lg font-bold font-display"
             />
           </div>

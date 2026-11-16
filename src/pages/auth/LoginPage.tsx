@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import toast from 'react-hot-toast';
 import { Mail, Lock, Eye, EyeOff, LogIn, CheckCircle2, KeyRound } from 'lucide-react';
 import { signInWithEmailAndPassword, updatePassword } from 'firebase/auth';
 import { auth } from '@/lib/firebase';
@@ -35,6 +36,7 @@ export default function LoginPage() {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
+  const resetLockRef = useRef(false);
 
   const {
     register,
@@ -75,59 +77,81 @@ export default function LoginPage() {
 
   async function handleDirectFirstAccessSetup(e: React.FormEvent) {
     e.preventDefault();
+    if (resetLoading || resetLockRef.current) return;
+
     const cleanEmail = resetEmail.trim().toLowerCase();
+    const cleanNewPwd = newPassword.trim();
+    const cleanConfirmPwd = confirmPassword.trim();
+
     if (!cleanEmail || !cleanEmail.includes('@')) {
       setResetError('Inserisci un indirizzo email valido.');
       return;
     }
-    if (newPassword.length < 6) {
-      setResetError('La password deve contenere almeno 6 caratteri.');
+    if (cleanNewPwd.length < 6) {
+      setResetError('La password deve contenere almeno 6 caratteri (senza soli spazi).');
       return;
     }
-    if (newPassword !== confirmPassword) {
+    if (cleanNewPwd !== cleanConfirmPwd) {
       setResetError('Le due password inserite non coincidono.');
       return;
     }
 
+    resetLockRef.current = true;
     setResetLoading(true);
     setResetError(null);
     try {
       const cred = await signInWithEmailAndPassword(auth, cleanEmail, paramInitPwd);
-      await updatePassword(cred.user, newPassword);
+      await updatePassword(cred.user, cleanNewPwd);
+      toast.success('Password impostata con successo! Accesso al portale in corso...');
       setResetModalOpen(false);
     } catch (err: unknown) {
       console.error('[LoginPage] Direct first access setup error:', err);
       const code = (err as { code?: string }).code;
-      if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
+      if (code === 'auth/network-request-failed') {
+        setResetError('Connessione internet assente o instabile. Verifica la rete dello smartphone e riprova.');
+      } else if (code === 'auth/too-many-requests') {
+        setResetError('Troppi tentativi ravvicinati. Attendi qualche istante e riprova.');
+      } else if (code === 'auth/invalid-credential' || code === 'auth/wrong-password') {
         setResetError('Questo account ha già una password personalizzata. Inseriscila nella schermata di accesso oppure clicca sotto per riceverne il ripristino via email.');
       } else {
         setResetError('Non è stato possibile completare l\'attivazione diretta. Puoi richiedere il link via email cliccando qui sotto.');
       }
     } finally {
+      resetLockRef.current = false;
       setResetLoading(false);
     }
   }
 
   async function handleSendReset(e: React.FormEvent) {
     e.preventDefault();
-    if (!resetEmail || !resetEmail.includes('@')) {
+    if (resetLoading || resetLockRef.current) return;
+
+    const cleanEmail = resetEmail.trim().toLowerCase();
+    if (!cleanEmail || !cleanEmail.includes('@')) {
       setResetError('Inserisci un indirizzo email valido');
       return;
     }
+    resetLockRef.current = true;
     setResetLoading(true);
     setResetError(null);
     try {
-      await sendResetEmail(resetEmail.trim());
+      await sendResetEmail(cleanEmail);
+      toast.success(`Email di attivazione inviata a ${cleanEmail}`);
       setResetSuccess(true);
     } catch (err: unknown) {
       console.error('[LoginPage] Reset error:', err);
       const code = (err as { code?: string }).code;
-      if (code === 'auth/user-not-found') {
+      if (code === 'auth/network-request-failed') {
+        setResetError('Connessione internet assente o instabile. Verifica la rete e riprova.');
+      } else if (code === 'auth/too-many-requests') {
+        setResetError('Troppi invii ravvicinati. Attendi qualche minuto e riprova.');
+      } else if (code === 'auth/user-not-found') {
         setResetError('Nessun account associato a questa email.');
       } else {
         setResetError('Impossibile inviare l\'email di ripristino. Riprova più tardi.');
       }
     } finally {
+      resetLockRef.current = false;
       setResetLoading(false);
     }
   }
@@ -135,14 +159,16 @@ export default function LoginPage() {
   async function onSubmit(data: LoginForm) {
     setAuthError(null);
     try {
-      await loginWithEmail(data.email, data.password);
+      await loginWithEmail(data.email.trim().toLowerCase(), data.password);
     } catch (err: unknown) {
       console.error('[LoginPage] Login error:', err);
       const code = (err as { code?: string }).code;
       setAuthError(
-        code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential'
-          ? 'Email o password errati. Riprova.'
-          : 'Errore di accesso. Riprova più tardi.'
+        code === 'auth/network-request-failed'
+          ? 'Connessione internet assente o instabile. Verifica la rete e riprova.'
+          : code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential'
+            ? 'Email o password errati. Riprova.'
+            : 'Errore di accesso. Riprova più tardi.'
       );
     }
   }

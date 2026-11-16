@@ -23,6 +23,18 @@ export interface MonthPaymentStatus {
 }
 
 /**
+ * Converte in sicurezza numeri o stringhe sporche (es. "40,50", NaN, negativi) in un importo positivo >= 0.
+ */
+export function toSafePositiveNumber(val: unknown): number {
+  if (typeof val === 'number') return Number.isFinite(val) && val > 0 ? val : 0;
+  if (typeof val === 'string') {
+    const parsed = parseFloat(val.replace(',', '.').trim());
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+  return 0;
+}
+
+/**
  * Calcola lo stato di pagamento di un allievo per una determinata mensilità.
  * Supporta ricevute multi-mese (p.months) e allievi iscritti a più corsi (quota unica mensile).
  */
@@ -32,9 +44,13 @@ export function getStudentMonthPaymentStatus(
   payments: Payment[] = [],
   academicYear?: string
 ): MonthPaymentStatus {
+  if (!studentId || !Array.isArray(payments) || payments.length === 0) {
+    return { status: 'unpaid', paidAmount: 0 };
+  }
+
   let startYear: number | null = null;
   let endYear: number | null = null;
-  if (academicYear && academicYear.includes('/')) {
+  if (typeof academicYear === 'string' && academicYear.includes('/')) {
     const parts = academicYear.split('/');
     const parsedStart = parseInt(parts[0], 10);
     const parsedEnd = parseInt(parts[1], 10);
@@ -45,10 +61,10 @@ export function getStudentMonthPaymentStatus(
   }
 
   const matching = payments.filter((p) => {
-    if (p.studentId !== studentId || p.status === 'cancelled' || p.type !== 'monthly') return false;
+    if (!p || p.studentId !== studentId || p.status === 'cancelled' || p.type !== 'monthly') return false;
     const monthsList: number[] = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
-      ? (p as any).months
-      : (p.month ? [p.month] : []);
+      ? (p as any).months.map((m: unknown) => Number(m)).filter((m: number) => Number.isFinite(m))
+      : (p.month ? [Number(p.month)] : []);
     if (!monthsList.includes(monthNum)) return false;
 
     if (startYear && endYear && p.year) {
@@ -75,18 +91,22 @@ export function getStudentMonthPaymentStatus(
   let receiptNumber: string | undefined;
 
   for (const p of matching) {
-    const monthsCount = (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
-      ? (p as any).months.length
-      : 1;
-    const rawPaid = p.paidAmount ?? (p.status === 'paid' ? p.amount : 0);
+    const monthsCount = Math.max(
+      1,
+      (p as any).months && Array.isArray((p as any).months) && (p as any).months.length > 0
+        ? (p as any).months.length
+        : 1
+    );
+    const rawPaid = toSafePositiveNumber(p.paidAmount ?? (p.status === 'paid' ? p.amount : 0));
     const perMonthPaid = rawPaid / monthsCount;
     totalPaidForMonth += perMonthPaid;
 
-    if (p.status === 'paid' || (p.remainingAmount !== undefined && p.remainingAmount <= 0 && rawPaid > 0)) {
+    if (p.status === 'paid' || (p.remainingAmount !== undefined && Number(p.remainingAmount) <= 0 && rawPaid > 0)) {
       isFullyPaid = true;
     }
-    if (p.receiptNumber) {
-      receiptNumber = String(p.receiptNumber);
+    if (p.receiptNumber !== undefined && p.receiptNumber !== null) {
+      const cleanedRec = String(p.receiptNumber).trim();
+      if (cleanedRec) receiptNumber = cleanedRec;
     }
   }
 
@@ -103,8 +123,9 @@ export function getStudentMonthPaymentStatus(
  * Verifica se l'allievo ha saldato la quota di iscrizione / tesseramento annuale.
  */
 export function hasStudentPaidRegistration(studentId: string, payments: Payment[] = []): boolean {
+  if (!studentId || !Array.isArray(payments)) return false;
   return payments.some(
-    (p) => p.studentId === studentId && p.type === 'registration' && p.status === 'paid'
+    (p) => p && p.studentId === studentId && p.type === 'registration' && p.status === 'paid'
   );
 }
 
@@ -267,11 +288,15 @@ export function buildCourseGridPage(
   drawTableHeader(tableTopY);
 
   // ── 4. RIGHE ALLIEVE ──
-  const enrolledStudents = students
-    .filter((s) => !s.isDeleted && s.isActive && s.enrolledCourseIds?.includes(course.id))
+  const safeStudents = Array.isArray(students) ? students : [];
+  const safePayments = Array.isArray(payments) ? payments : [];
+  const enrolledStudents = safeStudents
+    .filter((s) => s && !s.isDeleted && s.isActive && Array.isArray(s.enrolledCourseIds) && s.enrolledCourseIds.includes(course.id))
     .sort((a, b) => {
-      const cmp = a.lastName.localeCompare(b.lastName, 'it');
-      return cmp !== 0 ? cmp : a.firstName.localeCompare(b.firstName, 'it');
+      const aLast = (a.lastName || '').trim();
+      const bLast = (b.lastName || '').trim();
+      const cmp = aLast.localeCompare(bLast, 'it');
+      return cmp !== 0 ? cmp : (a.firstName || '').trim().localeCompare((b.firstName || '').trim(), 'it');
     });
 
   const rowHeight = 7.8;
@@ -311,10 +336,10 @@ export function buildCourseGridPage(
     doc.line(cellX + colWidths.num, currentY, cellX + colWidths.num, currentY + rowHeight);
     cellX += colWidths.num;
 
-    // Nome Allieva
+    // Nome Allieva (sanitized per dati sporchi/spazi)
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(darkText[0], darkText[1], darkText[2]);
-    const fullName = `${st.lastName.toUpperCase()} ${st.firstName.toUpperCase()}`;
+    const fullName = `${(st.lastName || '').trim().toUpperCase()} ${(st.firstName || '').trim().toUpperCase()}`.trim() || 'ALLIEVO';
     const truncatedName = fullName.length > 28 ? fullName.substring(0, 26) + '...' : fullName;
     doc.text(truncatedName, cellX + 2.5, currentY + 5);
     doc.line(cellX + colWidths.name, currentY, cellX + colWidths.name, currentY + rowHeight);
@@ -322,7 +347,7 @@ export function buildCourseGridPage(
 
     // 10 Mesi con stato pagamento reale OPPURE casella vuota per banco
     ACADEMIC_MONTHS.forEach((mObj) => {
-      const mStatus = getStudentMonthPaymentStatus(st.id, mObj.month, payments, academicYear);
+      const mStatus = getStudentMonthPaymentStatus(st.id, mObj.month, safePayments, academicYear);
 
       if (mStatus.status === 'paid') {
         doc.setFillColor(220, 252, 231); // Verde chiaro leggibile anche in stampa B/N
@@ -362,15 +387,15 @@ export function buildCourseGridPage(
     doc.setTextColor(grayText[0], grayText[1], grayText[2]);
     const effectiveFee =
       st.customMonthlyFee !== undefined && st.customMonthlyFee !== null
-        ? st.customMonthlyFee
-        : course.fee?.monthly;
-    const feeText = effectiveFee ? `€ ${effectiveFee},00` : '—';
+        ? toSafePositiveNumber(st.customMonthlyFee)
+        : toSafePositiveNumber(course.fee?.monthly);
+    const feeText = effectiveFee > 0 ? `€ ${effectiveFee.toFixed(0)},00` : '—';
     doc.text(feeText, cellX + colWidths.fee / 2, currentY + 5, { align: 'center' });
     doc.line(cellX + colWidths.fee, currentY, cellX + colWidths.fee, currentY + rowHeight);
     cellX += colWidths.fee;
 
     // Note / Stato Iscrizione Annuale
-    if (payments.length > 0 && hasStudentPaidRegistration(st.id, payments)) {
+    if (safePayments.length > 0 && hasStudentPaidRegistration(st.id, safePayments)) {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(6.5);
       doc.setTextColor(5, 150, 105);
@@ -502,9 +527,10 @@ export function generateAllCoursesAttendanceGridPDF(
     format: 'a4',
   });
 
-  const activeCourses = courses
-    .filter((c) => !c.isDeleted && c.isActive)
-    .sort((a, b) => a.name.localeCompare(b.name, 'it'));
+  const safeCourses = Array.isArray(courses) ? courses : [];
+  const activeCourses = safeCourses
+    .filter((c) => c && !c.isDeleted && c.isActive)
+    .sort((a, b) => (a.name || '').trim().localeCompare((b.name || '').trim(), 'it'));
 
   activeCourses.forEach((c, idx) => {
     const teacherName = c.teacherIds && c.teacherIds.length > 0
